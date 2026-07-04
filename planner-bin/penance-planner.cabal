@@ -1,0 +1,24 @@
+cabal-version: 3.8
+name: penance-planner
+version: 0.1.0.0
+build-type: Simple
+license: MIT
+
+executable penance-planner
+  main-is: Main.hs
+  hs-source-dirs: src
+  other-modules:
+    Penance.Json
+    Penance.Plan
+    Penance.Graph.Component
+    Penance.Graph.Module
+    Penance.Graph.Package
+    Penance.Graph.TH
+    Penance.Graph.Backpack
+    Penance.Emit.Drv
+  build-depends:
+    base >=4.18 && <5,
+    directory,
+    filepath
+  default-language: Haskell2010
+  ghc-options: -Wall

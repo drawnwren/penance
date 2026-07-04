@@ -1,0 +1,5 @@
+signature Data.MyAbstractMap where
+
+data Map k v
+
+empty :: Map k v

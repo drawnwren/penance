@@ -1,0 +1,32 @@
+cabal-version: 3.8
+name: penance-bench
+version: 0.1.0.0
+build-type: Simple
+license: MIT
+
+library
+  exposed-modules:
+    Bench.Api
+    Bench.App
+    Bench.Config
+    Bench.Generated
+    Bench.Model
+    Bench.Render
+    Bench.Route
+    Bench.Store
+    Bench.TH
+    Bench.Text
+  hs-source-dirs: src
+  build-depends:
+    base >=4.18 && <5,
+    containers,
+    template-haskell
+  default-language: Haskell2010
+
+executable penance-bench
+  main-is: Main.hs
+  hs-source-dirs: app
+  build-depends:
+    base >=4.18 && <5,
+    penance-bench
+  default-language: Haskell2010

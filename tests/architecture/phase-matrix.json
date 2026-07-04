@@ -1,0 +1,114 @@
+{
+  "schema": "penance/architecture-phase-matrix/1",
+  "description": "Architecture milestone benchmark matrix. Comparison rows are equivalent real builds on both sides. Failing rows are required comparisons that are not implemented yet.",
+  "phases": [
+    {
+      "id": "M0-primitives",
+      "milestone": "M0",
+      "title": "Dynamic derivation primitive probes",
+      "status": "failing",
+      "comparison": "dynamic-derivation-primitives",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "Dynamic derivation primitive probes are not implemented yet.",
+      "notes": "Add committed probes for nix derivation add, text-hash planner output, builtins.outputOf, recursive-nix add-path, CA cutoff, remote builders, and planner determinism."
+    },
+    {
+      "id": "M1-lock",
+      "milestone": "M1",
+      "title": "Commit-time lock generation",
+      "status": "failing",
+      "comparison": "penance-lock-vs-haskell-nix-eval",
+      "penanceAttr": null,
+      "haskellNixAttr": "haskellNixBenchExe",
+      "required": true,
+      "failure": "penance-lock is not implemented yet, so lock generation cannot be compared against haskell.nix evaluation.",
+      "notes": "Once penance-lock exists, time lock generation and freshness checks against haskell.nix project evaluation."
+    },
+    {
+      "id": "M2-static-unit-simple",
+      "milestone": "M2",
+      "title": "Static unit path on simple library fixture",
+      "status": "failing",
+      "comparison": "penance-real-build-vs-haskell-nix-real-build",
+      "penanceAttr": null,
+      "haskellNixAttr": "haskellNixSimpleLib",
+      "required": true,
+      "failure": "No real penance unit-builder target exists yet. The old simpleLibComponent graph-plan target is intentionally not used as a benchmark result.",
+      "notes": "Add the real unit builder target when M2 lands."
+    },
+    {
+      "id": "M2-static-unit-bench",
+      "milestone": "M2",
+      "title": "Static unit path on module-heavy benchmark",
+      "status": "failing",
+      "comparison": "penance-real-build-vs-haskell-nix-real-build",
+      "penanceAttr": null,
+      "haskellNixAttr": "haskellNixBenchExe",
+      "required": true,
+      "failure": "No real penance static component build target exists yet. The old penanceBenchComponent graph-plan target is intentionally not used as a benchmark result.",
+      "notes": "Add the real static component target when M2 lands."
+    },
+    {
+      "id": "M4-module-granularity",
+      "milestone": "M4",
+      "title": "Module-granular path on Template Haskell benchmark",
+      "status": "failing",
+      "comparison": "penance-real-module-build-vs-haskell-nix-real-build",
+      "penanceAttr": null,
+      "haskellNixAttr": "haskellNixBenchExe",
+      "required": true,
+      "failure": "No real penance module dynamic-derivation build target exists yet. The old penanceBenchModule graph-plan target is intentionally not used as a benchmark result.",
+      "notes": "Add the real module dynamic-derivation target when M4 lands."
+    },
+    {
+      "id": "M5-backpack",
+      "milestone": "M5",
+      "title": "First-class Backpack instantiation graph",
+      "status": "failing",
+      "comparison": "penance-backpack-plan-vs-haskell-nix-unavailable",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "No equivalent real Backpack build comparison exists yet. The old backpackMultiInstanceModule graph-plan target is intentionally not used as a benchmark result.",
+      "notes": "The current fixture validates penance Backpack planning only. Add a Cabal-valid Backpack build fixture and haskell.nix baseline before making this row required."
+    },
+    {
+      "id": "M6-cross-aarch64",
+      "milestone": "M6",
+      "title": "aarch64-linux target build",
+      "status": "failing",
+      "comparison": "penance-aarch64-vs-haskell-nix-aarch64",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "aarch64-linux real build comparison targets are not implemented yet.",
+      "notes": "Add native linux-builder VM targets and compare realized aarch64 closures."
+    },
+    {
+      "id": "M7-msc",
+      "milestone": "M7",
+      "title": "Multi-System Closure bundle",
+      "status": "failing",
+      "comparison": "penance-msc-vs-haskell-nix-system-closure",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "MSC bundle comparison targets are not implemented yet.",
+      "notes": "Add NixOS VM/fleet targets; compare bundle wall time, closure path count, and NAR size."
+    },
+    {
+      "id": "M7-warp",
+      "milestone": "M7",
+      "title": "Device deploy and hot-swap loop",
+      "status": "failing",
+      "comparison": "penance-warp-vs-haskell-nix-deploy-baseline",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "warp deploy and hot-swap comparison targets are not implemented yet.",
+      "notes": "Add VM targets and compare Tier 0 deploy plus Tier 1 service swap latency against full haskell.nix system activation."
+    }
+  ]
+}

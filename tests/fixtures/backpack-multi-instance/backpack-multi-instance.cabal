@@ -1,0 +1,34 @@
+cabal-version: 3.8
+name: backpack-multi-instance
+version: 0.1.0.0
+build-type: Simple
+license: MIT
+
+library
+  exposed-modules: UsesSignature
+  signatures: Data.MyAbstractMap
+  hs-source-dirs: src
+  build-depends: base >=4.18 && <5
+  default-language: Haskell2010
+
+executable intmap-user
+  main-is: IntMapUser.hs
+  hs-source-dirs: app
+  build-depends:
+    base >=4.18 && <5,
+    backpack-multi-instance,
+    containers
+  mixins:
+    backpack-multi-instance (Data.IntMap as Data.MyAbstractMap)
+  default-language: Haskell2010
+
+executable map-user
+  main-is: MapUser.hs
+  hs-source-dirs: app
+  build-depends:
+    base >=4.18 && <5,
+    backpack-multi-instance,
+    containers
+  mixins:
+    backpack-multi-instance (Data.Map as Data.MyAbstractMap)
+  default-language: Haskell2010
