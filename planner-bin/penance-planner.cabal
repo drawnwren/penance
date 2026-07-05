@@ -22,3 +22,57 @@ executable penance-planner
     filepath
   default-language: Haskell2010
   ghc-options: -Wall
+
+executable penance-architecture-bench
+  main-is: ArchitectureBenchMain.hs
+  hs-source-dirs: src
+  other-modules:
+    Penance.Json
+  build-depends:
+    base >=4.18 && <5,
+    directory,
+    filepath,
+    process,
+    time
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable penance-bench
+  main-is: BenchMain.hs
+  hs-source-dirs: src
+  build-depends:
+    base >=4.18 && <5,
+    directory,
+    filepath,
+    process,
+    time
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable penance-rebuild-bench
+  main-is: RebuildBenchMain.hs
+  hs-source-dirs: src
+  other-modules:
+    Penance.Json
+  build-depends:
+    base >=4.18 && <5,
+    directory,
+    filepath,
+    process,
+    time
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable penance-lock
+  main-is: LockMain.hs
+  hs-source-dirs: src
+  other-modules:
+    Penance.Json
+  build-depends:
+    base >=4.18 && <5,
+    Cabal,
+    bytestring,
+    directory,
+    filepath
+  default-language: Haskell2010
+  ghc-options: -Wall

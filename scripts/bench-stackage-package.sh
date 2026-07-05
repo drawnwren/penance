@@ -218,6 +218,10 @@ printf 'resolved %s in %s: %s-%s (%s, %s)\n' \
   "$package_name" "$resolver" "$package_name" "$package_version" "$snapshot_compiler_name" "$compiler_nix_name" >&2
 
 printf 'fetching Hackage source: %s-%s\n' "$package_name" "$package_version" >&2
+if [[ "${PENANCE_CABAL_UPDATE:-1}" != "0" ]]; then
+  printf 'updating Cabal package index\n' >&2
+  cabal update >/dev/null
+fi
 cabal_get_args=("$package_name-$package_version" "--destdir=$project_dir")
 if [[ -n "$snapshot_index_state" ]]; then
   cabal_get_args+=("--index-state=$snapshot_index_state")

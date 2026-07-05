@@ -1,8 +1,9 @@
 module UsesSignature
-  ( usesEmpty
+  ( usesEmptySize
   ) where
 
-import Data.MyAbstractMap qualified as AbstractMap
+import qualified Data.MyAbstractMap as AbstractMap
 
-usesEmpty :: AbstractMap.Map Int String
-usesEmpty = AbstractMap.empty
+usesEmptySize :: Int
+usesEmptySize =
+  AbstractMap.size (AbstractMap.empty :: AbstractMap.Map Int String)

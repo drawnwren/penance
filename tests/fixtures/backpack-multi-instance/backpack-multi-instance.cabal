@@ -11,24 +11,36 @@ library
   build-depends: base >=4.18 && <5
   default-language: Haskell2010
 
-executable intmap-user
-  main-is: IntMapUser.hs
-  hs-source-dirs: app
-  build-depends:
-    base >=4.18 && <5,
-    backpack-multi-instance,
-    containers
-  mixins:
-    backpack-multi-instance (Data.IntMap as Data.MyAbstractMap)
+library list-map
+  exposed-modules: Impl.ListMap
+  hs-source-dirs: impl-list
+  build-depends: base >=4.18 && <5
   default-language: Haskell2010
 
-executable map-user
-  main-is: MapUser.hs
+library tagged-map
+  exposed-modules: Impl.TaggedMap
+  hs-source-dirs: impl-tagged
+  build-depends: base >=4.18 && <5
+  default-language: Haskell2010
+
+executable list-user
+  main-is: ListUser.hs
   hs-source-dirs: app
   build-depends:
     base >=4.18 && <5,
     backpack-multi-instance,
-    containers
+    backpack-multi-instance:list-map
   mixins:
-    backpack-multi-instance (Data.Map as Data.MyAbstractMap)
+    backpack-multi-instance:list-map (Impl.ListMap as Data.MyAbstractMap)
+  default-language: Haskell2010
+
+executable tagged-user
+  main-is: TaggedUser.hs
+  hs-source-dirs: app
+  build-depends:
+    base >=4.18 && <5,
+    backpack-multi-instance,
+    backpack-multi-instance:tagged-map
+  mixins:
+    backpack-multi-instance:tagged-map (Impl.TaggedMap as Data.MyAbstractMap)
   default-language: Haskell2010

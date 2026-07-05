@@ -1,0 +1,81 @@
+{
+  "schema": "penance/rebuild-scenarios/1",
+  "description": "Rebuild-count scenarios for architecture cutoff work. Comparison rows enforce a bound; failing rows record current behavior until the matching architecture mechanism exists.",
+  "scenarios": [
+    {
+      "id": "PERF-noop-rebuild-penanceBenchReal",
+      "milestone": "PERF",
+      "title": "No-op rebuild of the benchmark executable",
+      "status": "comparison",
+      "attr": "penanceBenchReal",
+      "fixture": "tests/bench/vs-haskell-nix/project",
+      "edit": {
+        "type": "none"
+      },
+      "expectedMaxRebuiltDrvs": 0,
+      "required": true,
+      "failure": null,
+      "notes": "Baseline and edited dry-runs should have the same derivation build set."
+    },
+    {
+      "id": "M4-bench-body-edit-rebuild-count",
+      "milestone": "M4",
+      "title": "Benchmark module body edit rebuild count",
+      "status": "failing",
+      "attr": "penanceBenchReal",
+      "fixture": "tests/bench/vs-haskell-nix/project",
+      "edit": {
+        "type": "replace",
+        "file": "src/Bench/Model.hs",
+        "patch": {
+          "find": "  , User 3 \"barbara\"\n",
+          "replace": "  , User 3 \"katherine\"\n"
+        }
+      },
+      "expectedMaxRebuiltDrvs": null,
+      "required": true,
+      "failure": "The module cutoff mechanism is not implemented, so the scenario records the current rebuild set without enforcing a module-level bound.",
+      "notes": "This row becomes bounded when the module planner can prove body-only edits rebuild only the touched module plus assembly."
+    },
+    {
+      "id": "M5-backpack-hsig-edit-rebuild-count",
+      "milestone": "M5",
+      "title": "Backpack signature edit rebuild count",
+      "status": "failing",
+      "attr": "penanceBackpackReal",
+      "fixture": "tests/fixtures/backpack-multi-instance",
+      "edit": {
+        "type": "replace",
+        "file": "src/Data/MyAbstractMap.hsig",
+        "patch": {
+          "find": "data Map k v\n\n",
+          "replace": "data Map k v\n\n-- Rebuild scenario signature edit.\n\n"
+        }
+      },
+      "expectedMaxRebuiltDrvs": null,
+      "required": true,
+      "failure": "The Backpack rebuild matrix is not implemented, so this signature edit records the current derivation set without an enforced bound.",
+      "notes": "This row becomes bounded when indefinite units and instantiations have measured rebuild scopes."
+    },
+    {
+      "id": "M5-backpack-impl-body-edit-rebuild-count",
+      "milestone": "M5",
+      "title": "Backpack implementation body edit rebuild count",
+      "status": "failing",
+      "attr": "penanceBackpackReal",
+      "fixture": "tests/fixtures/backpack-multi-instance",
+      "edit": {
+        "type": "replace",
+        "file": "impl-list/Impl/ListMap.hs",
+        "patch": {
+          "find": "size (Map entries) = length entries\n",
+          "replace": "size (Map entries) = length entries + 0\n"
+        }
+      },
+      "expectedMaxRebuiltDrvs": null,
+      "required": true,
+      "failure": "The Backpack rebuild matrix is not implemented, so this implementation-body edit records the current derivation set without an enforced bound.",
+      "notes": "This row becomes bounded when implementation body edits cut off unchanged instantiation interfaces."
+    }
+  ]
+}

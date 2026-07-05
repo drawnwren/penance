@@ -2,15 +2,85 @@
 
 The repository now contains an opt-in comparison harness against the real upstream `input-output-hk/haskell.nix` flake input.
 
+The total benchmark entrypoint is:
+
+```sh
+nix run .#bench
+```
+
+This is the command that must stay complete as benchmark coverage grows. It runs
+the architecture phase suite, an architecture rebuild pass, rebuild-count
+scenarios, the haskell.nix advertised-baseline coverage suite, the architecture
+functionality-gap suite, surface parity validation, the legacy vs-haskell.nix
+harness, a default Hackage package validation, and a default Stackage package
+closure benchmark.
+
+The total runner captures each suite's detailed output in a per-run directory
+and ends with one aggregate summary table. For suites that compare penance and
+haskell.nix directly, the final output keeps the per-framework timings and the
+green check next to the faster backend. TSV-producing child suites are folded
+back into the final `Suite metrics` section. It also writes `summary.txt` and
+`summary.tsv` next to the suite logs.
+
+The default Stackage package is `servant`. To run the total suite against a
+different Stackage package, set `PENANCE_BENCH_STACKAGE_PACKAGE`, for example:
+
+```sh
+PENANCE_BENCH_STACKAGE_PACKAGE=text nix run .#bench
+```
+
+The Stackage suite realizes the full closure by default. For a local smoke run
+that only evaluates and dry-runs the closure, pass:
+
+```sh
+nix run .#bench -- --stackage-dry-run
+```
+
+The default Hackage validation package is `StateVar-1.2.2`. Override it with:
+
+```sh
+PENANCE_BENCH_HACKAGE_PACKAGE=colour-2.3.6 nix run .#bench
+```
+
+If the Stackage benchmark pauses at `haskell_nix_eval_closure`, that time is in
+the haskell.nix `stackProject'` dependency-closure path, not penance's planner
+build. The penance side is reported separately as `penance_plan_build`. On
+machines without the IOG haskell.nix cache configured, this step may build
+haskell.nix helper GHCs locally.
+
 For architecture milestone timing, use the phase benchmark suite in
 `docs/ARCHITECTURE_TESTING.md`. Unlike the original harness below, it performs
 real `nix build` commands by default and records penance/haskell.nix rows for
 each architecture phase in `tests/architecture/phase-matrix.json`.
 
 ```sh
-scripts/bench-architecture-phases.sh
 nix run .#bench-architecture-phases
 ```
+
+For haskell.nix advertised-baseline coverage, including explicit failing rows
+for parity features penance does not implement yet, run:
+
+```sh
+nix run .#bench-haskell-nix-baseline -- --keep-going
+```
+
+For required architecture functionality that still lacks a passing benchmark
+row, run:
+
+```sh
+nix run .#bench-architecture-functionality -- --keep-going
+```
+
+Those rows are intentionally failures until a real test or build target exists.
+
+For rebuild-count scenarios used by cutoff rows, run:
+
+```sh
+nix run .#bench-rebuild-scenarios -- --keep-going
+```
+
+The bounded no-op scenario enforces zero rebuilt derivations; scenarios without
+a bound report current counts and fail until the matching mechanism exists.
 
 The benchmark project lives at `tests/bench/vs-haskell-nix/project`. It is intentionally small enough to run while still including:
 

@@ -18,11 +18,16 @@ that emits graph-plan JSON. This validates the basic shape of cheap Nix eval
 and graph planning, but it is still missing the architectural pieces that make
 STRATA correct and useful at scale:
 
-- no committed lockfile produced by cabal-as-a-library
-- no real dynamic `.drv` emission through `nix derivation add`
+- only an MVP committed lockfile for ordinary benchmark units, not a full
+  Cabal solver or Backpack-aware lock
+- no production module `.drv` emission through `nix derivation add`; the
+  architecture suite currently exercises `ghc -M` and per-module GHC compile
+  steps as the first real module-granular target
 - no content-addressed unit builder with `iface`/`out` split
 - only prototype Backpack graph artifacts, not Cabal-accurate unit nodes
-- no dev shell projection, MSC bundle tool, or warp device loop
+- no dev shell projection, production MSC bundle tool, or SSH-backed warp device
+  loop; the architecture suite currently exercises file-cache bundle and local
+  hot-swap targets
 
 The target architecture below supersedes the prototype where they conflict.
 
@@ -295,26 +300,48 @@ The existing checks remain:
 - `checks.<system>.graph-plan-prototype`
 - `checks.<system>.bench-surface-parity`
 - `checks.<system>.nix-format`
+- `checks.<system>.haskell-nix-baseline-static`
+- `checks.<system>.architecture-functionality-static`
 
 The architecture phase benchmark is:
 
-- `scripts/bench-architecture-phases.sh`
 - `nix run .#bench-architecture-phases`
 
-It reads `tests/architecture/phase-matrix.json` and records eval plus `nix build`
-timings for penance and haskell.nix phase targets. Rows marked `comparison` are
-equivalent real builds. Rows marked `failing` are unfinished or broken required
-comparisons; there is no separate future-work state.
+The haskell.nix advertised-baseline coverage benchmark is:
 
-They must be joined by architecture-gating tests before cutover:
+- `nix run .#bench-haskell-nix-baseline -- --keep-going`
 
-- lock determinism and `penance-lock --check`
+The required architecture functionality gap benchmark is:
+
+- `nix run .#bench-architecture-functionality -- --keep-going`
+
+The phase benchmark reads `tests/architecture/phase-matrix.json` and records
+eval plus `nix build` timings for penance and haskell.nix phase targets. Rows
+marked `comparison` are equivalent real builds. Rows marked `failing` are
+unfinished or broken required comparisons; there is no separate future-work
+state.
+
+The baseline benchmark reads
+`tests/architecture/haskell-nix-baseline-matrix.json`. It intentionally keeps
+missing haskell.nix parity features as `failing` rows so they remain visible in
+CI and benchmark output.
+
+The functionality benchmark reads
+`tests/architecture/functionality-gap-matrix.json`. It keeps required
+architecture work that is not yet represented by a passing benchmark as
+`failing` rows, excluding the extra M0 primitive-probe work.
+
+They must be hardened by architecture-gating tests before cutover:
+
+- full lock determinism beyond the benchmark `penance-lock --check`
 - wasm-vs-Nix lowerer equality
 - no-IFD flake check
 - unit-builder cutoff matrix
-- module-planner dynamic-derivation probes
+- module-planner dynamic-derivation probes beyond the current `ghc -M`
+  per-module target
 - Backpack rebuild matrix
 - dev shell external-package suppression
-- MSC install in a VM with no experimental features
-- warp Tier 0 and Tier 1 VM tests
+- MSC install in a VM with no experimental features beyond the current
+  file-cache bundle target
+- warp Tier 0 and Tier 1 VM tests beyond the current local hot-swap target
 - weekly kill-switch matrix

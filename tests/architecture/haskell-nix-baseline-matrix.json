@@ -1,0 +1,138 @@
+{
+  "schema": "penance/architecture-phase-matrix/1",
+  "description": "Coverage matrix for the advertised haskell.nix baseline. Comparison rows have real targets on both sides. Failing rows are required haskell.nix parity capabilities that penance does not implement yet.",
+  "phases": [
+    {
+      "id": "HN-cabal-project-plan",
+      "milestone": "HN",
+      "title": "Cabal project translation",
+      "status": "comparison",
+      "comparison": "penance-lock-vs-haskell-nix-cabal-project-plan",
+      "penanceAttr": "penanceLockBench",
+      "haskellNixAttr": "haskellNixBenchPlan",
+      "required": true,
+      "failure": null,
+      "notes": "Tracks haskell.nix cabalProject' / plan-nix baseline against the current penance committed-lock path."
+    },
+    {
+      "id": "HN-component-builds",
+      "milestone": "HN",
+      "title": "Cabal component derivations",
+      "status": "comparison",
+      "comparison": "penance-component-build-vs-haskell-nix-component-build",
+      "penanceAttr": "penanceBenchReal",
+      "haskellNixAttr": "haskellNixBenchExe",
+      "required": true,
+      "failure": null,
+      "notes": "Tracks the advertised component-derivation baseline for an executable component."
+    },
+    {
+      "id": "HN-backpack-build",
+      "milestone": "HN",
+      "title": "Backpack project build",
+      "status": "comparison",
+      "comparison": "penance-backpack-build-vs-haskell-nix-backpack-build",
+      "penanceAttr": "penanceBackpackReal",
+      "haskellNixAttr": "haskellNixBackpackExe",
+      "required": true,
+      "failure": null,
+      "notes": "Tracks Backpack build parity on the local multi-instantiation fixture."
+    },
+    {
+      "id": "HN-stack-project",
+      "milestone": "HN",
+      "title": "Stack project translation",
+      "status": "failing",
+      "comparison": "stack-project-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix advertises Stack project translation through project' / stackProject'; penance intentionally has no Stack parser or benchmark fixture yet.",
+      "notes": "Add a Stack fixture and a penance lock path or mark Stack unsupported by explicit product decision."
+    },
+    {
+      "id": "HN-hackage-package-set",
+      "milestone": "HN",
+      "title": "Hackage package-set builds",
+      "status": "failing",
+      "comparison": "hackage-package-set-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix ships hackage.nix-backed package sets; penance only has surface validation smoke tests and no lock-backed Hackage unit builder benchmark.",
+      "notes": "Turn this into a comparison when penance can lock and build a selected Hackage package and dependency closure."
+    },
+    {
+      "id": "HN-stackage-snapshot",
+      "milestone": "HN",
+      "title": "Stackage snapshot package-set builds",
+      "status": "failing",
+      "comparison": "stackage-snapshot-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix ships stackage.nix snapshots; penance has a Stackage closure benchmark but no STRATA snapshot lock or build path.",
+      "notes": "Turn this into a comparison when snapshot.yaml generation and lock-backed Stackage builds exist."
+    },
+    {
+      "id": "HN-shell-for",
+      "milestone": "HN",
+      "title": "shellFor development environment",
+      "status": "failing",
+      "comparison": "shell-for-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": "haskellNixBenchShell",
+      "required": true,
+      "failure": "haskell.nix exposes shellFor, ghcWithPackages, and ghcWithHoogle; penance does not yet expose a lock-backed dev shell or HLS projection.",
+      "notes": "Turn this into a comparison when devShells.<system>.default is backed by external package DB composition."
+    },
+    {
+      "id": "HN-project-cross",
+      "milestone": "HN",
+      "title": "Haskell project cross compilation",
+      "status": "failing",
+      "comparison": "project-cross-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix exposes projectCross for Haskell projects; penance currently benchmarks only a C-level aarch64 ELF probe, not a full cross Haskell project.",
+      "notes": "Turn this into a comparison when the aarch64-linux Haskell fixture builds through the target toolchain lane."
+    },
+    {
+      "id": "HN-project-variants-overrides",
+      "milestone": "HN",
+      "title": "Project variants, modules, and overrides",
+      "status": "failing",
+      "comparison": "project-variants-overrides-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix exposes projectVariants, appendModule, extend, overlays, modules, and extras; penance does not yet have an equivalent override/materialization benchmark.",
+      "notes": "Turn this into a comparison when STRATA lock overrides and kill-switch variants are benchmarked."
+    },
+    {
+      "id": "HN-tests-benches-checks",
+      "milestone": "HN",
+      "title": "Tests, benchmarks, and checks collection",
+      "status": "failing",
+      "comparison": "tests-benches-checks-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix exposes test, benchmark, and check collection helpers; penance has no benchmark fixture proving these component classes end to end.",
+      "notes": "Turn this into a comparison when the fixture contains tests and benchmarks and penance exposes matching build/check attrs."
+    },
+    {
+      "id": "HN-materialization-cache",
+      "milestone": "HN",
+      "title": "Plan materialization and cache workflow",
+      "status": "failing",
+      "comparison": "materialization-cache-parity",
+      "penanceAttr": null,
+      "haskellNixAttr": null,
+      "required": true,
+      "failure": "haskell.nix supports materialized plan outputs and cache-oriented workflows; penance still lacks the CA realisation / cache-anchor parity benchmark.",
+      "notes": "Turn this into a comparison when M3 cache realisation or anchor fallback is implemented and measured."
+    }
+  ]
+}
