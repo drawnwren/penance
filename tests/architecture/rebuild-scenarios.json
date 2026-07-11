@@ -3,11 +3,11 @@
   "description": "Rebuild-count scenarios for architecture cutoff work. Comparison rows enforce a bound; failing rows record current behavior until the matching architecture mechanism exists.",
   "scenarios": [
     {
-      "id": "PERF-noop-rebuild-penanceBenchReal",
+      "id": "PERF-noop-rebuild-penanceBenchViaLock",
       "milestone": "PERF",
       "title": "No-op rebuild of the benchmark executable",
       "status": "comparison",
-      "attr": "penanceBenchReal",
+      "attr": "penanceBenchViaLock",
       "fixture": "tests/bench/vs-haskell-nix/project",
       "edit": {
         "type": "none"
@@ -21,8 +21,9 @@
       "id": "M4-bench-body-edit-rebuild-count",
       "milestone": "M4",
       "title": "Benchmark module body edit rebuild count",
-      "status": "failing",
-      "attr": "penanceBenchReal",
+      "status": "comparison",
+      "mode": "dyndrv-build-log",
+      "attr": "penanceBenchDyndrv",
       "fixture": "tests/bench/vs-haskell-nix/project",
       "edit": {
         "type": "replace",
@@ -32,10 +33,127 @@
           "replace": "  , User 3 \"katherine\"\n"
         }
       },
-      "expectedMaxRebuiltDrvs": null,
+      "expectedMaxRebuiltDrvs": 3,
+      "expectedRebuiltNames": [
+        "assemble",
+        "module:src/Bench/Model.hs",
+        "planner"
+      ],
       "required": true,
-      "failure": "The module cutoff mechanism is not implemented, so the scenario records the current rebuild set without enforcing a module-level bound.",
-      "notes": "This row becomes bounded when the module planner can prove body-only edits rebuild only the touched module plus assembly."
+      "failure": null,
+      "notes": "Real dyndrv build-log mode warms a baseline build, applies a body-only edit, and requires exactly the planner, src/Bench/Model.hs module derivation, and final assemble derivation."
+    },
+    {
+      "id": "M4-module-cutoff-30-body-edit",
+      "milestone": "M4",
+      "title": "Thirty-module fixture body edit cutoff",
+      "status": "comparison",
+      "mode": "dyndrv-build-log",
+      "attr": "penanceModuleCutoff30Dyndrv",
+      "fixture": "tests/fixtures/module-cutoff-30",
+      "edit": {
+        "type": "replace",
+        "file": "src/Cutoff/M15.hs",
+        "patch": {
+          "find": "m15 = m13 ++ \"|m15-body\"\n",
+          "replace": "m15 = m13 ++ \"|m15-body-edited\"\n"
+        }
+      },
+      "expectedMaxRebuiltDrvs": 3,
+      "expectedRebuiltNames": [
+        "assemble",
+        "module:src/Cutoff/M15.hs",
+        "planner"
+      ],
+      "required": true,
+      "failure": null,
+      "notes": "Body-only edit in the middle of the thirty-module diamond graph must not rebuild dependents; the exact set is planner, M15, and assemble."
+    },
+    {
+      "id": "M4-module-cutoff-30-export-edit",
+      "milestone": "M4",
+      "title": "Thirty-module fixture export edit fanout",
+      "status": "comparison",
+      "mode": "dyndrv-build-log",
+      "attr": "penanceModuleCutoff30Dyndrv",
+      "fixture": "tests/fixtures/module-cutoff-30",
+      "edit": {
+        "type": "replace",
+        "file": "src/Cutoff/M15.hs",
+        "patch": {
+          "find": "m15 = m13 ++ \"|m15-body\"\n",
+          "replace": "m15 = m13 ++ \"|m15-body\"\n\nm15Export :: String\nm15Export = \"m15-export\"\n"
+        }
+      },
+      "expectedMaxRebuiltDrvs": 19,
+      "expectedRebuiltNames": [
+        "assemble",
+        "module:app/Main.hs",
+        "module:src/Cutoff/M15.hs",
+        "module:src/Cutoff/M16.hs",
+        "module:src/Cutoff/M17.hs",
+        "module:src/Cutoff/M18.hs",
+        "module:src/Cutoff/M19.hs",
+        "module:src/Cutoff/M20.hs",
+        "module:src/Cutoff/M21.hs",
+        "module:src/Cutoff/M22.hs",
+        "module:src/Cutoff/M23.hs",
+        "module:src/Cutoff/M24.hs",
+        "module:src/Cutoff/M25.hs",
+        "module:src/Cutoff/M26.hs",
+        "module:src/Cutoff/M27.hs",
+        "module:src/Cutoff/M28.hs",
+        "module:src/Cutoff/M29.hs",
+        "module:src/Cutoff/M30.hs",
+        "planner"
+      ],
+      "required": true,
+      "failure": null,
+      "notes": "Export-shape edit to M15 must rebuild M15, all true transitive dependents, app/Main.hs, planner, and assemble, while unrelated M01-M14 modules stay absent."
+    },
+    {
+      "id": "M4-module-cutoff-30-noop",
+      "milestone": "M4",
+      "title": "Thirty-module fixture no-op cutoff",
+      "status": "comparison",
+      "mode": "dyndrv-build-log",
+      "attr": "penanceModuleCutoff30Dyndrv",
+      "fixture": "tests/fixtures/module-cutoff-30",
+      "edit": {
+        "type": "none"
+      },
+      "expectedMaxRebuiltDrvs": 0,
+      "expectedRebuiltNames": [],
+      "required": true,
+      "failure": null,
+      "notes": "No edit after the warmed baseline must produce no planner rebuild, no module compiles, and no assemble rebuild."
+    },
+    {
+      "id": "M4-hs-boot-th-dep-body-edit",
+      "milestone": "M4",
+      "title": "Template Haskell dependency body edit cutoff",
+      "status": "comparison",
+      "mode": "dyndrv-build-log",
+      "attr": "penanceHsBootThDyndrv",
+      "fixture": "tests/fixtures/hs-boot-th",
+      "edit": {
+        "type": "replace",
+        "file": "src/TH/Dep.hs",
+        "patch": {
+          "find": "depValue = \"dep-v1\"\n",
+          "replace": "depValue = \"dep-v2\"\n"
+        }
+      },
+      "expectedMaxRebuiltDrvs": 4,
+      "expectedRebuiltNames": [
+        "assemble",
+        "module:src/TH/Dep.hs",
+        "module:src/TH/Splice.hs",
+        "planner"
+      ],
+      "required": true,
+      "failure": null,
+      "notes": "Body-only edit in the dependency of a Template Haskell splice must rebuild the dependency object, the dbFull splice module, planner, and assemble; the dbIface sibling module is excluded by the exact set."
     },
     {
       "id": "M5-backpack-hsig-edit-rebuild-count",

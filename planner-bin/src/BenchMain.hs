@@ -2,7 +2,7 @@ module Main (main) where
 
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (forM)
-import Data.List (intercalate, isPrefixOf, isSuffixOf)
+import Data.List (elemIndex, intercalate, isPrefixOf, isSuffixOf, nub)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Time.Clock (diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
@@ -37,6 +37,7 @@ data Options = Options
   { optSystem :: Maybe String,
     optArchitectureRunner :: Maybe FilePath,
     optFunctionalityRunner :: Maybe FilePath,
+    optDynamicProbesRunner :: Maybe FilePath,
     optBaselineRunner :: Maybe FilePath,
     optRebuildScenariosRunner :: Maybe FilePath,
     optSurfaceRunner :: Maybe FilePath,
@@ -67,8 +68,8 @@ data SuiteResult = SuiteResult
 
 defaultOptions :: IO Options
 defaultOptions = do
-  resolver <- lookupEnvWithDefault "PENANCE_BENCH_STACKAGE_RESOLVER" "lts-23.25"
-  stackagePackage <- lookupEnvWithDefault "PENANCE_BENCH_STACKAGE_PACKAGE" "servant"
+  resolver <- lookupEnvWithDefault "PENANCE_BENCH_STACKAGE_RESOLVER" "lts-24.41"
+  stackagePackage <- lookupEnvWithDefault "PENANCE_BENCH_STACKAGE_PACKAGE" "StateVar"
   hackagePackage <- lookupEnvWithDefault "PENANCE_BENCH_HACKAGE_PACKAGE" "StateVar-1.2.2"
   hackageIndexState <- lookupEnv "PENANCE_BENCH_HACKAGE_INDEX_STATE"
   stackageDryRun <- truthyEnv <$> lookupEnv "PENANCE_BENCH_STACKAGE_DRY_RUN"
@@ -78,6 +79,7 @@ defaultOptions = do
       { optSystem = Nothing,
         optArchitectureRunner = Nothing,
         optFunctionalityRunner = Nothing,
+        optDynamicProbesRunner = Nothing,
         optBaselineRunner = Nothing,
         optRebuildScenariosRunner = Nothing,
         optSurfaceRunner = Nothing,
@@ -100,6 +102,7 @@ main = do
   systemName <- requireOption "system" optSystem options
   architectureRunner <- requireOption "architecture-runner" optArchitectureRunner options
   functionalityRunner <- requireOption "architecture-functionality-runner" optFunctionalityRunner options
+  dynamicProbesRunner <- requireOption "dynamic-probes-runner" optDynamicProbesRunner options
   baselineRunner <- requireOption "haskell-nix-baseline-runner" optBaselineRunner options
   rebuildScenariosRunner <- requireOption "rebuild-scenarios-runner" optRebuildScenariosRunner options
   surfaceRunner <- requireOption "surface-parity-runner" optSurfaceRunner options
@@ -113,31 +116,37 @@ main = do
         [ Suite
             { suiteName = "architecture-phases",
               suiteLabel = "Architecture phases",
-              suiteCommand = [architectureRunner, "--keep-going"],
+              suiteCommand = [architectureRunner, "--keep-going", "--repeat", "3", "--require-penance-faster"],
               suiteEnv = [("PENANCE_PHASE_BENCH_OUT", outDir </> "architecture")]
             },
           Suite
             { suiteName = "architecture-rebuild",
               suiteLabel = "Architecture rebuild",
-              suiteCommand = [architectureRunner, "--keep-going", "--rebuild"],
+              suiteCommand = [architectureRunner, "--keep-going", "--rebuild", "--allow-haskell-nix-failures"],
               suiteEnv = [("PENANCE_PHASE_BENCH_OUT", outDir </> "architecture-rebuild")]
             },
           Suite
             { suiteName = "architecture-functionality",
               suiteLabel = "Architecture functionality gaps",
-              suiteCommand = [functionalityRunner, "--keep-going"],
+              suiteCommand = [functionalityRunner, "--keep-going", "--allow-not-implemented"],
               suiteEnv = [("PENANCE_PHASE_BENCH_OUT", outDir </> "architecture-functionality")]
+            },
+          Suite
+            { suiteName = "dynamic-probes",
+              suiteLabel = "Dynamic derivation probes",
+              suiteCommand = [dynamicProbesRunner],
+              suiteEnv = [("PENANCE_DYNAMIC_PROBES_OUT", outDir </> "dynamic-probes")]
             },
           Suite
             { suiteName = "rebuild-scenarios",
               suiteLabel = "Rebuild scenarios",
-              suiteCommand = [rebuildScenariosRunner, "--keep-going"],
+              suiteCommand = [rebuildScenariosRunner, "--keep-going", "--allow-not-implemented"],
               suiteEnv = [("PENANCE_REBUILD_BENCH_OUT", outDir </> "rebuild-scenarios")]
             },
           Suite
             { suiteName = "haskell-nix-baseline",
               suiteLabel = "haskell.nix baseline",
-              suiteCommand = [baselineRunner, "--keep-going"],
+              suiteCommand = [baselineRunner, "--keep-going", "--repeat", "3", "--require-penance-faster"],
               suiteEnv = [("PENANCE_PHASE_BENCH_OUT", outDir </> "haskell-nix-baseline")]
             },
           Suite
@@ -195,6 +204,8 @@ parseArgs options ("--architecture-runner" : value : rest) =
   parseArgs options {optArchitectureRunner = Just value} rest
 parseArgs options ("--architecture-functionality-runner" : value : rest) =
   parseArgs options {optFunctionalityRunner = Just value} rest
+parseArgs options ("--dynamic-probes-runner" : value : rest) =
+  parseArgs options {optDynamicProbesRunner = Just value} rest
 parseArgs options ("--haskell-nix-baseline-runner" : value : rest) =
   parseArgs options {optBaselineRunner = Just value} rest
 parseArgs options ("--rebuild-scenarios-runner" : value : rest) =
@@ -231,6 +242,7 @@ usageText =
     [ "usage: penance-bench --system SYSTEM \\",
       "                     --architecture-runner PATH \\",
       "                     --architecture-functionality-runner PATH \\",
+      "                     --dynamic-probes-runner PATH \\",
       "                     --haskell-nix-baseline-runner PATH \\",
       "                     --rebuild-scenarios-runner PATH \\",
       "                     --surface-parity-runner PATH \\",
@@ -241,8 +253,8 @@ usageText =
       "Options:",
       "  --hackage-package PACKAGE     default: PENANCE_BENCH_HACKAGE_PACKAGE or StateVar-1.2.2",
       "  --hackage-index-state STATE   default: validate-hackage-package default",
-      "  --stackage-resolver RESOLVER  default: PENANCE_BENCH_STACKAGE_RESOLVER or lts-23.25",
-      "  --stackage-package PACKAGE    default: PENANCE_BENCH_STACKAGE_PACKAGE or servant",
+      "  --stackage-resolver RESOLVER  default: PENANCE_BENCH_STACKAGE_RESOLVER or lts-24.41",
+      "  --stackage-package PACKAGE    default: PENANCE_BENCH_STACKAGE_PACKAGE or StateVar",
       "  --stackage-dry-run            use dry-run mode for the Stackage closure suite",
       "  --out-dir DIR                 default: docs/bench-results/bench/SYSTEM-TIMESTAMP"
     ]
@@ -279,7 +291,7 @@ resolveOutDir _ (Just dir) = pure dir
 resolveOutDir systemName Nothing = do
   cwd <- getCurrentDirectory
   stamp <- timestamp
-  if "/nix/store/" `isPrefixOfString` cwd
+  if "/nix/store/" `isPrefixOf` cwd
     then do
       tmp <- getTemporaryDirectory
       pure (tmp </> "penance-bench-results" </> (systemName <> "-" <> stamp))
@@ -437,7 +449,7 @@ collectMetricTables results =
       case contents of
         Left _ -> pure []
         Right text -> do
-          let paths = uniqueStrings (metricPathsFromLog (lines text))
+          let paths = nub (metricPathsFromLog (lines text))
           fmap concat $
             forM paths $ \path -> do
               exists <- doesFileExist path
@@ -503,10 +515,10 @@ renderMetricRow header fields =
 
 renderWallField :: [String] -> [String] -> String
 renderWallField header fields =
-  case indexOf "wall_seconds" header of
+  case elemIndex "wall_seconds" header of
     Just index -> fieldAt index fields <> "s"
     Nothing ->
-      case indexOf "wall_ms" header of
+      case elemIndex "wall_ms" header of
         Just index -> renderMillisText (fieldAt index fields)
         Nothing -> fieldAt 2 fields <> "s"
 
@@ -528,17 +540,9 @@ fieldNamed header fields names fallback =
 firstIndex :: [String] -> [String] -> Maybe Int
 firstIndex [] _ = Nothing
 firstIndex (name : rest) values =
-  case indexOf name values of
+  case elemIndex name values of
     Just index -> Just index
     Nothing -> firstIndex rest values
-
-indexOf :: String -> [String] -> Maybe Int
-indexOf needle = go 0
-  where
-    go _ [] = Nothing
-    go index (value : rest)
-      | value == needle = Just index
-      | otherwise = go (index + 1) rest
 
 fieldAt :: Int -> [String] -> String
 fieldAt index fields =
@@ -616,9 +620,6 @@ isSimpleShellChar :: Char -> Bool
 isSimpleShellChar char =
   char `elem` (['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9'] <> "-_./:=+@,%")
 
-isPrefixOfString :: String -> String -> Bool
-isPrefixOfString prefix value = take (length prefix) value == prefix
-
 pluralize :: Int -> String -> String
 pluralize 1 value = value
 pluralize _ value = value <> "s"
@@ -638,14 +639,6 @@ splitOnTab value =
   case break (== '\t') value of
     (field, []) -> [field]
     (field, _ : rest) -> field : splitOnTab rest
-
-uniqueStrings :: [String] -> [String]
-uniqueStrings = go []
-  where
-    go _ [] = []
-    go seen (value : rest)
-      | value `elem` seen = go seen rest
-      | otherwise = value : go (value : seen) rest
 
 truthyEnv :: Maybe String -> Bool
 truthyEnv Nothing = False

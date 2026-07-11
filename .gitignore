@@ -1,6 +1,6 @@
 /result
 /result-*
-/wasm-planner/target
+/planner-bin/dist-newstyle
 dist-newstyle/
 /.direnv
 /docs/bench-results

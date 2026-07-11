@@ -1,0 +1,4 @@
+module C
+decl: rendered :: String
+body: rendered = show B.doubled
+comment: depends on B interface

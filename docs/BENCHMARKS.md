@@ -22,11 +22,24 @@ green check next to the faster backend. TSV-producing child suites are folded
 back into the final `Suite metrics` section. It also writes `summary.txt` and
 `summary.tsv` next to the suite logs.
 
-The default Stackage package is `servant`. To run the total suite against a
-different Stackage package, set `PENANCE_BENCH_STACKAGE_PACKAGE`, for example:
+Gap suites stay strict when run directly, but the total runner records their
+`not_implemented` rows as allowed gaps so `nix run .#bench` can be the complete
+measurement command. The architecture rebuild pass also records haskell.nix-only
+`--rebuild` nondeterminism without making the aggregate run fail.
+
+The total runner uses three repeats for the architecture phase and
+haskell.nix-baseline comparison suites. Those suites print section-total medians
+and fail the aggregate run if an implemented section is not faster on penance
+than on haskell.nix.
+
+The default Stackage resolver/package pair is `lts-24.41` / `StateVar`. It
+keeps the total benchmark's Stackage closure lane small and on the same GHC
+9.10.3 snapshot family as the architecture baseline. To run the total suite
+against a larger Stackage package such as `servant`, set
+`PENANCE_BENCH_STACKAGE_PACKAGE`, for example:
 
 ```sh
-PENANCE_BENCH_STACKAGE_PACKAGE=text nix run .#bench
+PENANCE_BENCH_STACKAGE_PACKAGE=servant nix run .#bench
 ```
 
 The Stackage suite realizes the full closure by default. For a local smoke run
@@ -57,12 +70,18 @@ each architecture phase in `tests/architecture/phase-matrix.json`.
 nix run .#bench-architecture-phases
 ```
 
+Add `--repeat 3 --require-penance-faster` to enforce the same section-median
+speed gate used by the total benchmark.
+
 For haskell.nix advertised-baseline coverage, including explicit failing rows
 for parity features penance does not implement yet, run:
 
 ```sh
 nix run .#bench-haskell-nix-baseline -- --keep-going
 ```
+
+Add `--repeat 3 --require-penance-faster` to enforce the same section-median
+speed gate used by the total benchmark.
 
 For required architecture functionality that still lacks a passing benchmark
 row, run:
@@ -72,6 +91,8 @@ nix run .#bench-architecture-functionality -- --keep-going
 ```
 
 Those rows are intentionally failures until a real test or build target exists.
+The total benchmark passes `--allow-not-implemented` so the same rows remain in
+the logs without failing the aggregate run.
 
 For rebuild-count scenarios used by cutoff rows, run:
 
@@ -79,8 +100,17 @@ For rebuild-count scenarios used by cutoff rows, run:
 nix run .#bench-rebuild-scenarios -- --keep-going
 ```
 
-The bounded no-op scenario enforces zero rebuilt derivations; scenarios without
-a bound report current counts and fail until the matching mechanism exists.
+The bounded no-op scenario enforces zero rebuilt derivations. Dyndrv cutoff
+rows use real build logs to assert exact planner/module/assemble events, while
+older rows still use dry-run derivation diffs. Scenarios without a bound report
+current counts and fail until the matching mechanism exists. The total
+benchmark allows only those `not_implemented` scenario rows; a broken bounded
+scenario still fails the run.
+
+The M4 dyndrv scenarios now include the benchmark body edit, the thirty-module
+body/export/no-op fixture, and the hs-boot/Template-Haskell fixture where a
+dependency body edit rebuilds the dependency object and splice module while the
+ordinary sibling stays cut off.
 
 The benchmark project lives at `tests/bench/vs-haskell-nix/project`. It is intentionally small enough to run while still including:
 
@@ -182,7 +212,7 @@ The current validated result is:
   "status": "ok",
   "counts": {
     "packages": 1,
-    "components": 2,
+    "components": 4,
     "modules": 11
   },
   "compared": {
@@ -234,19 +264,19 @@ Current limitation: this validates the package/component surface against haskell
 Use the Stackage package benchmark when you want the package selected from a snapshot and the Nix build to realize its dependency closure:
 
 ```sh
-nix run .#bench-stackage-package -- lts-23.25 servant
+nix run .#bench-stackage-package -- lts-24.41 StateVar
 ```
 
 Equivalent long-form flags:
 
 ```sh
-nix run .#bench-stackage-package -- --resolver lts-23.25 --package servant
+nix run .#bench-stackage-package -- --resolver lts-24.41 --package StateVar
 ```
 
 For a fast smoke test that still resolves the snapshot and computes the closure JSON without realizing the full compiler/package closure:
 
 ```sh
-nix run .#bench-stackage-package -- --dry-run lts-23.25 servant
+nix run .#bench-stackage-package -- --dry-run lts-24.41 StateVar
 ```
 
 The app:

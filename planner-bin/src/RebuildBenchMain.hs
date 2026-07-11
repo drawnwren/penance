@@ -1,6 +1,6 @@
 module Main (main) where
 
-import Control.Exception (bracket)
+import Control.Exception (SomeException, throwIO, try)
 import Control.Monad (unless, when)
 import Data.Char (isAlphaNum)
 import Data.List (intercalate, isPrefixOf, isSuffixOf, sort, nub, (\\))
@@ -38,6 +38,7 @@ data Options = Options
   , optOutDir :: FilePath
   , optSelected :: [String]
   , optKeepGoing :: Bool
+  , optAllowNotImplemented :: Bool
   , optList :: Bool
   , optNixBin :: FilePath
   }
@@ -48,14 +49,21 @@ data Scenario = Scenario
   , scenarioMilestone :: String
   , scenarioTitle :: String
   , scenarioStatus :: String
+  , scenarioMode :: RebuildMode
   , scenarioAttr :: String
   , scenarioFixture :: FilePath
   , scenarioEdit :: Edit
   , scenarioExpectedMax :: Maybe Int
+  , scenarioExpectedNames :: Maybe [String]
   , scenarioRequired :: Bool
   , scenarioFailure :: Maybe String
   , scenarioNotes :: Maybe String
   }
+  deriving (Eq, Show)
+
+data RebuildMode
+  = DryRunDiff
+  | DyndrvBuildLog
   deriving (Eq, Show)
 
 data Edit
@@ -128,6 +136,7 @@ parseOptions args = do
                 envOut
           , optSelected = []
           , optKeepGoing = False
+          , optAllowNotImplemented = False
           , optList = False
           , optNixBin = nixBin
           }
@@ -142,6 +151,7 @@ parseOptions args = do
         "--out-dir" : value : xs -> go options {optOutDir = value} xs
         "--scenario" : value : xs -> go options {optSelected = optSelected options ++ [value]} xs
         "--keep-going" : xs -> go options {optKeepGoing = True} xs
+        "--allow-not-implemented" : xs -> go options {optAllowNotImplemented = True} xs
         "--list" : xs -> go options {optList = True} xs
         "-h" : _ -> usage >> exitSuccess
         "--help" : _ -> usage >> exitSuccess
@@ -164,6 +174,8 @@ usage =
       , "  --out-dir DIR         output directory"
       , "  --scenario ID         run one scenario; may be repeated"
       , "  --keep-going          continue after a failed scenario"
+      , "  --allow-not-implemented"
+      , "                        report not_implemented scenarios but do not fail the suite"
       , "  --list                print scenarios and exit"
       , "  -h, --help            show this help"
       ]
@@ -194,18 +206,27 @@ readScenarios path = do
 decodeScenario :: Json -> IO Scenario
 decodeScenario value = do
   fields <- expectObject "scenario" value
-  Scenario
-    <$> stringField "id" fields
-    <*> stringField "milestone" fields
+  scenarioIdValue <- stringField "id" fields
+  mode <- decodeRebuildMode =<< optionalStringField "mode" fields
+  Scenario scenarioIdValue
+    <$> stringField "milestone" fields
     <*> stringField "title" fields
     <*> stringField "status" fields
+    <*> pure mode
     <*> stringField "attr" fields
     <*> stringField "fixture" fields
     <*> (decodeEdit =<< objectField "edit" fields)
     <*> optionalIntField "expectedMaxRebuiltDrvs" fields
+    <*> optionalStringArrayField "expectedRebuiltNames" fields
     <*> boolField "required" fields
     <*> optionalStringField "failure" fields
     <*> optionalStringField "notes" fields
+
+decodeRebuildMode :: Maybe String -> IO RebuildMode
+decodeRebuildMode Nothing = pure DryRunDiff
+decodeRebuildMode (Just "drv-diff") = pure DryRunDiff
+decodeRebuildMode (Just "dyndrv-build-log") = pure DyndrvBuildLog
+decodeRebuildMode (Just other) = die ("unknown rebuild scenario mode: " ++ other)
 
 decodeEdit :: [(String, Json)] -> IO Edit
 decodeEdit fields = do
@@ -271,7 +292,7 @@ runBench options system scenarios = do
       , "  " ++ metricsJsonl
       , "  " ++ summaryJson
       ]
-  hPutStr stderr (renderHumanSummary system failures rows)
+  hPutStr stderr (renderHumanSummary system options failures rows)
   when (failures /= 0) exitFailure
 
 selected :: Options -> Scenario -> Bool
@@ -285,97 +306,185 @@ runScenarios options system logDir scenarios =
     go rows failures [] = pure (rows, failures)
     go rows failures (scenario : rest) = do
       hPutStr stderr ("rebuild scenario " ++ scenarioId scenario ++ " (" ++ scenarioTitle scenario ++ ")\n")
-      (row, failed) <- runScenario options system logDir scenario
-      let failuresAfter = failures + if failed then 1 else 0
+      row <- runScenario options system logDir scenario
+      let failed = rowIsEffectiveFailure options row
+          failuresAfter = failures + if failed then 1 else 0
           rowsAfter = rows ++ [row]
       if failed && not (optKeepGoing options)
         then pure (rowsAfter, failuresAfter)
         else go rowsAfter failuresAfter rest
 
-runScenario :: Options -> String -> FilePath -> Scenario -> IO (Row, Bool)
+runScenario :: Options -> String -> FilePath -> Scenario -> IO Row
 runScenario options system logDir scenario = do
   overallStart <- nowMillis
-  bracket (copyFlakeToTemp options scenario) (removePathForcibly . fst) $ \(_, repo) -> do
-    let ref = ".#packages." ++ system ++ "." ++ scenarioAttr scenario
-        drvRef = ref ++ ".drvPath"
-        safeId = sanitize (scenarioId scenario)
-        baselineLog = logDir </> safeId ++ "-baseline-dry-run.log"
-        pathInfoLog = logDir </> safeId ++ "-baseline-path-info.log"
-        evalLog = logDir </> safeId ++ "-edited-eval.log"
-        editedLog = logDir </> safeId ++ "-edited-dry-run.log"
-    baseline <- timedReadToLog repo baselineLog (optNixBin options) ["build", "--dry-run", ref, "-L"]
-    pathInfo <- timedReadToLog repo pathInfoLog (optNixBin options) ["path-info", "--derivation", "-r", ref]
-    editResult <- applyEdit repo scenario
-    editedEval <- timedReadToLog repo evalLog (optNixBin options) ["eval", "--raw", drvRef]
-    edited <- timedReadToLog repo editedLog (optNixBin options) ["build", "--dry-run", ref, "-L"]
-    overallEnd <- nowMillis
+  (root, repo) <- copyFlakeToTemp options scenario
+  result <- try (runScenarioInRepo overallStart repo) :: IO (Either SomeException Row)
+  case result of
+    Left exception -> do
+      hPutStr stderr ("kept rebuild worktree after runner error: " ++ root ++ "\n")
+      throwIO exception
+    Right row -> do
+      if rowIsEffectiveFailure options row
+        then hPutStr stderr ("kept rebuild worktree: " ++ root ++ "\n")
+        else removePathForcibly root
+      pure row
+  where
+    runScenarioInRepo overallStart repo = do
+      let ref = ".#packages." ++ system ++ "." ++ scenarioAttr scenario
+          drvRef = ref ++ ".drvPath"
+          plannerRef = ".#packages." ++ system ++ "." ++ dyndrvPlannerAttr (scenarioAttr scenario)
+          safeId = sanitize (scenarioId scenario)
+          baselinePlannerLog = logDir </> safeId ++ "-baseline-planner.log"
+          baselineLog =
+            logDir
+              </> safeId
+              ++ case scenarioMode scenario of
+                DryRunDiff -> "-baseline-dry-run.log"
+                DyndrvBuildLog -> "-baseline-build.log"
+          pathInfoLog = logDir </> safeId ++ "-baseline-path-info.log"
+          evalLog = logDir </> safeId ++ "-edited-eval.log"
+          editedPlannerLog = logDir </> safeId ++ "-edited-planner.log"
+          editedLog =
+            logDir
+              </> safeId
+              ++ case scenarioMode scenario of
+                DryRunDiff -> "-edited-dry-run.log"
+                DyndrvBuildLog -> "-edited-build.log"
+      baselineSaltResult <- saltDyndrvBaseline repo scenario
+      baselinePlanner <-
+        case scenarioMode scenario of
+          DryRunDiff -> pure emptyCommandResult
+          DyndrvBuildLog -> timedReadToLog repo baselinePlannerLog (optNixBin options) ["build", plannerRef, "--no-link", "--print-out-paths", "-L"]
+      baseline <-
+        case scenarioMode scenario of
+          DryRunDiff -> timedReadToLog repo baselineLog (optNixBin options) ["build", "--dry-run", ref, "-L"]
+          DyndrvBuildLog -> timedDyndrvRootBuild repo baselineLog (optNixBin options) baselinePlanner
+      pathInfo <-
+        case scenarioMode scenario of
+          DryRunDiff -> timedReadToLog repo pathInfoLog (optNixBin options) ["path-info", "--derivation", "-r", ref]
+          DyndrvBuildLog -> pure emptyCommandResult
+      editResult <- applyEdit repo scenario
+      editedEval <- timedReadToLog repo evalLog (optNixBin options) ["eval", "--raw", drvRef]
+      editedPlanner <-
+        case scenarioMode scenario of
+          DryRunDiff -> pure emptyCommandResult
+          DyndrvBuildLog -> timedReadToLog repo editedPlannerLog (optNixBin options) ["build", plannerRef, "--no-link", "--print-out-paths", "-L"]
+      edited <-
+        case scenarioMode scenario of
+          DryRunDiff -> timedReadToLog repo editedLog (optNixBin options) ["build", "--dry-run", ref, "-L"]
+          DyndrvBuildLog -> timedDyndrvRootBuild repo editedLog (optNixBin options) editedPlanner
+      overallEnd <- nowMillis
 
-    let baselineDrvs = extractDrvPaths (crStdout baseline ++ "\n" ++ crStderr baseline)
-        pathInfoDrvs = extractDrvPaths (crStdout pathInfo ++ "\n" ++ crStderr pathInfo)
-        editedDrvs = extractDrvPaths (crStdout edited ++ "\n" ++ crStderr edited)
-        rebuiltDrvs = sort (editedDrvs \\ baselineDrvs)
-        rebuiltNames = map drvName rebuiltDrvs
-        count = length rebuiltDrvs
-        commandStatus =
-          firstNonZero
-            [ ("baseline dry-run", baseline)
-            , ("edited eval", editedEval)
-            , ("edited dry-run", edited)
-            ]
-        boundStatus =
-          case scenarioExpectedMax scenario of
-            Just maxValue | count > maxValue -> Just ("rebuilt drv count " ++ show count ++ " exceeds expected maximum " ++ show maxValue)
-            _ -> Nothing
-        statusFailure =
-          if scenarioStatus scenario == "failing"
-            then Just (fromMaybe "Required rebuild scenario does not have an enforced bound yet" (scenarioFailure scenario))
-            else Nothing
-        editFailure =
-          case editResult of
-            Nothing -> Nothing
-            Just message -> Just message
-        statusText =
-          case commandStatus <|> editFailure <|> boundStatus <|> statusFailure of
-            Nothing -> "0"
-            Just message ->
-              if scenarioStatus scenario == "failing" && commandStatus == Nothing && editFailure == Nothing && boundStatus == Nothing
-                then "not_implemented"
-                else message
-        failed = statusText /= "0"
-        drvPath = nonEmptyMaybe (strip (crStdout editedEval))
-        logText = intercalate ", " [baselineLog, pathInfoLog, evalLog, editedLog]
-        commandText =
-          intercalate
-            "; "
-            [ "worktree " ++ repo
-            , "edit " ++ editDescription (scenarioEdit scenario)
-            , "baseline dry-run drvs " ++ show (length baselineDrvs)
-            , "baseline path-info drvs " ++ show (length pathInfoDrvs)
-            , "edited dry-run drvs " ++ show (length editedDrvs)
-            , "rebuilt drvs " ++ show count
-            ]
-        row =
-          Row
-            { rowRunId = "r1"
-            , rowPhaseId = scenarioId scenario
-            , rowMilestone = scenarioMilestone scenario
-            , rowPhaseTitle = scenarioTitle scenario
-            , rowBackend = "penance"
-            , rowAttr = Just (scenarioAttr scenario)
-            , rowAction = "rebuild_dry_run"
-            , rowStatus = statusText
-            , rowSupported = commandStatus == Nothing && editFailure == Nothing
-            , rowWallMs = overallEnd - overallStart
-            , rowDrvPath = drvPath
-            , rowOutPath = Nothing
-            , rowClosureNarSize = 0
-            , rowLog = Just logText
-            , rowCommand = Just commandText
-            , rowRebuiltDrvCount = count
-            , rowRebuiltDrvNames = rebuiltNames
-            , rowExpectedMaxRebuiltDrvs = scenarioExpectedMax scenario
-            }
-    pure (row, failed)
+      let baselineDrvs = extractDrvPaths (crStdout baseline ++ "\n" ++ crStderr baseline)
+          pathInfoDrvs = extractDrvPaths (crStdout pathInfo ++ "\n" ++ crStderr pathInfo)
+          editedDrvs = extractDrvPaths (crStdout edited ++ "\n" ++ crStderr edited)
+          rebuiltDrvs = sort (editedDrvs \\ baselineDrvs)
+          editedEvents =
+            dyndrvBuildEvents
+              ( crStdout editedPlanner
+                  ++ "\n"
+                  ++ crStderr editedPlanner
+                  ++ "\n"
+                  ++ crStdout edited
+                  ++ "\n"
+                  ++ crStderr edited
+              )
+          (rebuiltNames, count) =
+            case scenarioMode scenario of
+              DryRunDiff -> (map drvName rebuiltDrvs, length rebuiltDrvs)
+              DyndrvBuildLog -> (editedEvents, length editedEvents)
+          commandStatus =
+            firstNonZero $
+              case scenarioMode scenario of
+                DryRunDiff ->
+                  [ ("baseline dry-run", baseline)
+                  , ("edited eval", editedEval)
+                  , ("edited dry-run", edited)
+                  ]
+                DyndrvBuildLog ->
+                  [ ("baseline planner build", baselinePlanner)
+                  , ("baseline emitted root build", baseline)
+                  , ("edited eval", editedEval)
+                  , ("edited planner build", editedPlanner)
+                  , ("edited emitted root build", edited)
+                  ]
+          boundStatus =
+            case scenarioExpectedMax scenario of
+              Just maxValue | count > maxValue -> Just ("rebuilt drv count " ++ show count ++ " exceeds expected maximum " ++ show maxValue)
+              _ -> Nothing
+          exactStatus =
+            case scenarioExpectedNames scenario of
+              Just expectedNames | sort expectedNames /= sort rebuiltNames ->
+                Just
+                  ( "rebuilt names "
+                      ++ show rebuiltNames
+                      ++ " do not match expected names "
+                      ++ show (sort expectedNames)
+                  )
+              _ -> Nothing
+          statusFailure =
+            if scenarioStatus scenario == "failing"
+              then Just (fromMaybe "Required rebuild scenario does not have an enforced bound yet" (scenarioFailure scenario))
+              else Nothing
+          editFailure =
+            baselineSaltResult <|> editResult
+          statusText =
+            case commandStatus <|> editFailure <|> boundStatus <|> exactStatus <|> statusFailure of
+              Nothing -> "0"
+              Just message ->
+                if scenarioStatus scenario == "failing" && commandStatus == Nothing && editFailure == Nothing && boundStatus == Nothing && exactStatus == Nothing
+                  then "not_implemented"
+                  else message
+          drvPath = nonEmptyMaybe (strip (crStdout editedEval))
+          logText =
+            intercalate ", " $
+              case scenarioMode scenario of
+                DryRunDiff -> [baselineLog, pathInfoLog, evalLog, editedLog]
+                DyndrvBuildLog -> [baselinePlannerLog, baselineLog, evalLog, editedPlannerLog, editedLog]
+          commandText =
+            intercalate
+              "; "
+              ( [ "worktree " ++ repo
+                , "edit " ++ editDescription (scenarioEdit scenario)
+                ]
+                  ++ case scenarioMode scenario of
+                    DryRunDiff ->
+                      [ "baseline dry-run drvs " ++ show (length baselineDrvs)
+                      , "baseline path-info drvs " ++ show (length pathInfoDrvs)
+                      , "edited dry-run drvs " ++ show (length editedDrvs)
+                      , "rebuilt drvs " ++ show count
+                      ]
+                    DyndrvBuildLog ->
+                      [ "baseline build events ignored after warm-up"
+                      , "edited build events " ++ show rebuiltNames
+                      , "rebuilt events " ++ show count
+                      ]
+              )
+          row =
+            Row
+              { rowRunId = "r1"
+              , rowPhaseId = scenarioId scenario
+              , rowMilestone = scenarioMilestone scenario
+              , rowPhaseTitle = scenarioTitle scenario
+              , rowBackend = "penance"
+              , rowAttr = Just (scenarioAttr scenario)
+              , rowAction =
+                  case scenarioMode scenario of
+                    DryRunDiff -> "rebuild_dry_run"
+                    DyndrvBuildLog -> "dyndrv_build_log"
+              , rowStatus = statusText
+              , rowSupported = commandStatus == Nothing && editFailure == Nothing
+              , rowWallMs = overallEnd - overallStart
+              , rowDrvPath = drvPath
+              , rowOutPath = Nothing
+              , rowClosureNarSize = 0
+              , rowLog = Just logText
+              , rowCommand = Just commandText
+              , rowRebuiltDrvCount = count
+              , rowRebuiltDrvNames = rebuiltNames
+              , rowExpectedMaxRebuiltDrvs = scenarioExpectedMax scenario
+              }
+      pure row
 
 copyFlakeToTemp :: Options -> Scenario -> IO (FilePath, FilePath)
 copyFlakeToTemp options scenario = do
@@ -415,6 +524,12 @@ skipCopyPath path =
   path == ".git"
     || path == "docs/bench-results"
     || ("docs/bench-results/" `isPrefixOf` path)
+    -- Gitignored build outputs; without .git the worktree is a path flake,
+    -- so anything copied here is also re-hashed into the store per nix call.
+    -- dist-newstyle appears at any depth (fixture projects build in-tree).
+    || path == "wasm-planner/target"
+    || takeFileNameSimple path == "dist-newstyle"
+    || takeFileNameSimple path == ".direnv"
     || takeFileNameSimple path == "result"
     || ("result-" `isPrefixOf` takeFileNameSimple path)
 
@@ -432,7 +547,55 @@ applyEdit repo scenario =
           length contents `seq` pure ()
           case replaceOnce needle replacement contents of
             Nothing -> pure (Just ("edit marker not found in " ++ path))
-            Just updated -> length updated `seq` writeFile path updated >> pure Nothing
+            Just updated -> do
+              finalContents <- saltDyndrvEdit scenario updated
+              length finalContents `seq` writeFile path finalContents >> pure Nothing
+
+saltDyndrvBaseline :: FilePath -> Scenario -> IO (Maybe String)
+saltDyndrvBaseline repo scenario
+  | scenarioMode scenario /= DyndrvBuildLog = pure Nothing
+  | otherwise =
+      case scenarioEdit scenario of
+        NoEdit -> pure Nothing
+        ReplaceEdit file _ _ -> do
+          let path = repo </> scenarioFixture scenario </> file
+          exists <- doesFileExist path
+          if not exists
+            then pure (Just ("baseline salt file not found: " ++ path))
+            else do
+              contents <- readFile path
+              salted <- appendErasedDyndrvSalt scenario "baseline" contents
+              length salted `seq` writeFile path salted >> pure Nothing
+
+saltDyndrvEdit :: Scenario -> String -> IO String
+saltDyndrvEdit scenario contents
+  | scenarioMode scenario /= DyndrvBuildLog = pure contents
+  | scenarioIsExportEdit scenario = appendInterfaceDyndrvSalt scenario "edited" contents
+  | otherwise = appendErasedDyndrvSalt scenario "edited" contents
+
+appendErasedDyndrvSalt :: Scenario -> String -> String -> IO String
+appendErasedDyndrvSalt scenario label contents = do
+  salt <- nowMillis
+  let separator =
+        if "\n" `isSuffixOf` contents
+          then ""
+          else "\n"
+  pure (contents ++ separator ++ "  -- penance rebuild scenario " ++ label ++ " salt: " ++ sanitize (scenarioId scenario) ++ "-" ++ show salt ++ "\n")
+
+appendInterfaceDyndrvSalt :: Scenario -> String -> String -> IO String
+appendInterfaceDyndrvSalt scenario label contents = do
+  salt <- nowMillis
+  let separator =
+        if "\n" `isSuffixOf` contents
+          then "\n"
+          else "\n\n"
+  pure (contents ++ separator ++ "-- penance rebuild scenario " ++ label ++ " interface salt: " ++ sanitize (scenarioId scenario) ++ "-" ++ show salt ++ "\n")
+
+scenarioIsExportEdit :: Scenario -> Bool
+scenarioIsExportEdit scenario =
+  case splitOn "export" (scenarioId scenario) of
+    Just _ -> True
+    Nothing -> False
 
 timedReadToLog :: FilePath -> FilePath -> FilePath -> [String] -> IO CommandResult
 timedReadToLog workingDir logPath command args = do
@@ -467,11 +630,86 @@ timedReadToLog workingDir logPath command args = do
       , crCommand = commandText
       }
 
+timedDyndrvRootBuild :: FilePath -> FilePath -> FilePath -> CommandResult -> IO CommandResult
+timedDyndrvRootBuild workingDir logPath nixBin plannerResult =
+  case dyndrvRootRef plannerResult of
+    Just rootRef -> timedReadToLog workingDir logPath nixBin ["build", rootRef, "--no-link", "-L"]
+    Nothing -> skippedCommandToLog workingDir logPath "planner build did not produce an emitted root drv path"
+
+dyndrvRootRef :: CommandResult -> Maybe String
+dyndrvRootRef result
+  | crStatus result /= 0 = Nothing
+  | otherwise = do
+      plannerOut <- firstNonEmptyLine (crStdout result)
+      pure (plannerOut ++ "^out")
+
+firstNonEmptyLine :: String -> Maybe String
+firstNonEmptyLine =
+  nonEmptyMaybe . strip . unlines . take 1 . filter (not . null . strip) . lines
+
+skippedCommandToLog :: FilePath -> FilePath -> String -> IO CommandResult
+skippedCommandToLog workingDir logPath reason = do
+  createDirectoryIfMissing True (takeDirectorySimple logPath)
+  writeFile logPath $
+    unlines
+      [ "command: <skipped>"
+      , "cwd: " ++ workingDir
+      , "status: 1"
+      , "wall_ms: 0"
+      , ""
+      , "stdout:"
+      , ""
+      , ""
+      , "stderr:"
+      , reason
+      ]
+  pure
+    CommandResult
+      { crStatus = 1
+      , crWallMs = 0
+      , crStdout = ""
+      , crStderr = reason
+      , crCommand = "<skipped>"
+      }
+
+emptyCommandResult :: CommandResult
+emptyCommandResult =
+  CommandResult
+    { crStatus = 0
+    , crWallMs = 0
+    , crStdout = ""
+    , crStderr = ""
+    , crCommand = ""
+    }
+
 firstNonZero :: [(String, CommandResult)] -> Maybe String
 firstNonZero [] = Nothing
 firstNonZero ((label, result) : rest)
   | crStatus result == 0 = firstNonZero rest
   | otherwise = Just (label ++ " exited " ++ show (crStatus result))
+
+dyndrvBuildEvents :: String -> [String]
+dyndrvBuildEvents =
+  sort . nub . mapMaybe dyndrvBuildEvent . lines
+
+dyndrvBuildEvent :: String -> Maybe String
+dyndrvBuildEvent line
+  | lineHasPlannerBuild line = Just "planner"
+  | Just (_, source) <- splitOn "compiled penance-dyndrv-module " line = Just ("module:" ++ strip source)
+  | Just _ <- splitOn "assembled penance-bench-dyndrv" line = Just "assemble"
+  | otherwise = Nothing
+
+lineHasPlannerBuild :: String -> Bool
+lineHasPlannerBuild line =
+  case splitOn "building '" line of
+    Just (_, rest) ->
+      case splitOn "dyndrv-planner.drv.drv" rest of
+        Just _ -> True
+        Nothing -> False
+    Nothing -> False
+
+dyndrvPlannerAttr :: String -> String
+dyndrvPlannerAttr attr = attr ++ "Planner"
 
 extractDrvPaths :: String -> [FilePath]
 extractDrvPaths =
@@ -499,12 +737,9 @@ splitOn needle haystack =
   go "" haystack
   where
     go _ [] = Nothing
-    go prefix rest
+    go prefix rest@(ch : xs)
       | needle `isPrefixOf` rest = Just (reverse prefix, drop (length needle) rest)
-      | otherwise =
-          case rest of
-            ch : xs -> go (ch : prefix) xs
-            [] -> Nothing
+      | otherwise = go (ch : prefix) xs
 
 drvName :: FilePath -> String
 drvName path =
@@ -529,7 +764,14 @@ summaryJsonValue stamp system options failures rows =
     , ("system", Json.string system)
     , ("flake", Json.string (optFlake options))
     , ("scenarios", Json.string (optScenarios options))
+    , ( "options"
+      , Json.object
+          [ ("allowNotImplemented", Json.bool (optAllowNotImplemented options))
+          ]
+      )
     , ("failures", jsonNumber (toInteger failures))
+    , ("recordedFailures", jsonNumber (toInteger (countFailureRows rows)))
+    , ("allowedFailures", jsonNumber (toInteger (countAllowedFailures options rows)))
     , ("rows", Json.array (map rowJson rows))
     ]
 
@@ -556,17 +798,22 @@ rowJson row =
     , ("expectedMaxRebuiltDrvs", maybe Json.JsonNull (jsonNumber . toInteger) (rowExpectedMaxRebuiltDrvs row))
     ]
 
-renderHumanSummary :: String -> Int -> [Row] -> String
-renderHumanSummary system failures rows =
+renderHumanSummary :: String -> Options -> Int -> [Row] -> String
+renderHumanSummary system options failures rows =
   unlines $
     [ "Rebuild scenario summary"
     , "  system: " ++ system
     , "  result: " ++ if failures == 0 then "PASS" else "FAIL (" ++ show failures ++ " failure(s))"
+    , "  recorded failures: " ++ show (countFailureRows rows) ++ allowedFailureSuffix
     , "  rows: " ++ show (length rows)
     , ""
     , "Failures:"
     ]
       ++ renderFailures
+      ++ [ ""
+         , "Allowed failures:"
+         ]
+      ++ renderAllowedFailures
       ++ [ ""
          , "Measurements:"
          , "  SCENARIO                          STATUS           REBUILT  WALL"
@@ -574,9 +821,14 @@ renderHumanSummary system failures rows =
          ]
       ++ map renderMeasurement rows
   where
-    failingRows = filter ((/= "0") . rowStatus) rows
-    renderFailures =
-      if null failingRows
+    failingRows = filter (rowIsEffectiveFailure options) rows
+    allowedFailureRows = filter (rowIsAllowedFailure options) rows
+    allowedFailureSuffix =
+      case countAllowedFailures options rows of
+        0 -> ""
+        n -> " (" ++ show n ++ " allowed)"
+    renderRowLines rowsToRender =
+      if null rowsToRender
         then ["  none"]
         else
           map
@@ -588,7 +840,9 @@ renderHumanSummary system failures rows =
                   ++ "]: "
                   ++ fromMaybe "see logs" (rowCommand row)
             )
-            failingRows
+            rowsToRender
+    renderFailures = renderRowLines failingRows
+    renderAllowedFailures = renderRowLines allowedFailureRows
 
 renderMeasurement :: Row -> String
 renderMeasurement row =
@@ -649,6 +903,24 @@ tsvHeader =
     , "expected_max_rebuilt_drvs"
     ]
 
+rowIsFailure :: Row -> Bool
+rowIsFailure row =
+  rowStatus row /= "0"
+
+rowIsAllowedFailure :: Options -> Row -> Bool
+rowIsAllowedFailure options row =
+  optAllowNotImplemented options && rowStatus row == "not_implemented"
+
+rowIsEffectiveFailure :: Options -> Row -> Bool
+rowIsEffectiveFailure options row =
+  rowIsFailure row && not (rowIsAllowedFailure options row)
+
+countFailureRows :: [Row] -> Int
+countFailureRows = length . filter rowIsFailure
+
+countAllowedFailures :: Options -> [Row] -> Int
+countAllowedFailures options = length . filter (rowIsAllowedFailure options)
+
 expectObject :: String -> Json -> IO [(String, Json)]
 expectObject _ (JsonObject fields) = pure fields
 expectObject context other = die ("expected JSON object for " ++ context ++ ", got " ++ show other)
@@ -681,6 +953,17 @@ optionalStringField name fields =
     Just JsonNull -> pure Nothing
     Nothing -> pure Nothing
     Just other -> die ("expected JSON string/null field `" ++ name ++ "`, got " ++ show other)
+
+optionalStringArrayField :: String -> [(String, Json)] -> IO (Maybe [String])
+optionalStringArrayField name fields =
+  case lookup name fields of
+    Just JsonNull -> pure Nothing
+    Nothing -> pure Nothing
+    Just (JsonArray values) -> Just <$> traverse decodeString values
+    Just other -> die ("expected JSON string array/null field `" ++ name ++ "`, got " ++ show other)
+  where
+    decodeString (JsonString value) = pure value
+    decodeString other = die ("expected JSON string in `" ++ name ++ "`, got " ++ show other)
 
 boolField :: String -> [(String, Json)] -> IO Bool
 boolField name fields =

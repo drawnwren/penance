@@ -1,0 +1,11 @@
+# Excerpt from https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/24/41.yaml
+# Resolver: lts-24.41
+# Fetched: 2026-07-05
+resolver:
+  compiler: ghc-9.10.3
+packages:
+- hackage: StateVar-1.2.2@sha256:3c022c00485fe165e3080d5da6b3ca9c9b02f62c5deebc584d1b3d1309ce673e,1673
+  pantry-tree:
+    sha256: 204cac98219e99334f47b12c565945611748ea03a4d629273dd697d738bcfd7f
+    size: 314
+publish-time: 2026-05-17T21:47:00.466295659Z

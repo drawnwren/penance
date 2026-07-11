@@ -1,0 +1,4 @@
+module A
+decl: value :: Int
+body: value = 1
+comment: baseline body note

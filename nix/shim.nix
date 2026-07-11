@@ -31,15 +31,15 @@ in
   else if !(builtins ? wasm) then
     throw ''
       penanceProject requires Determinate Nix with the `wasm-builtin` experimental feature.
-      This checkout has the Rust planner source, but evaluation cannot call builtins.wasm.
+      This checkout has the Haskell planner source, but evaluation cannot call builtins.wasm.
     ''
   else if !(builtins.pathExists plannerWasm) then
     throw ''
       penanceProject expected a committed planner Wasm blob at ${toString plannerWasm}.
-      Build wasm-planner for wasm32-wasip1 and commit/copy the result to nix/planner.wasm.
+      Build .#wasmPlannerBuiltin with GHC's wasm32-wasi backend and commit/copy
+      the result to nix/planner.wasm.
     ''
   else
     builtins.fromJSON (builtins.wasm {
       path = plannerWasm;
-      function = "normalize_project";
     } inputJson)

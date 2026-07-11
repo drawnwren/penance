@@ -266,7 +266,6 @@ cat >"$work_dir/flake.nix" <<EOF
       system = $nix_system;
       pkgs = import penance.inputs.nixpkgs {
         inherit system;
-        overlays = [ (import penance.inputs.rust-overlay) ];
       };
       haskellNix = penance.inputs.haskellNix;
       haskellNixPkgs = import haskellNix.inputs.nixpkgs-unstable {

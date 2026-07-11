@@ -18,16 +18,25 @@ that emits graph-plan JSON. This validates the basic shape of cheap Nix eval
 and graph planning, but it is still missing the architectural pieces that make
 STRATA correct and useful at scale:
 
-- only an MVP committed lockfile for ordinary benchmark units, not a full
-  Cabal solver or Backpack-aware lock
+- an MVP lock-driven unit builder for ordinary local components and the
+  StateVar external sdist fixture, including content-addressed split
+  `iface`/`out` outputs for ordinary local units, but not a full Cabal solver
+  or Backpack-aware lock
 - no production module `.drv` emission through `nix derivation add`; the
   architecture suite currently exercises `ghc -M` and per-module GHC compile
   steps as the first real module-granular target
-- no content-addressed unit builder with `iface`/`out` split
+- no content-addressed split builder yet for Hackage, Backpack, or
+  module-granular units
 - only prototype Backpack graph artifacts, not Cabal-accurate unit nodes
-- no dev shell projection, production MSC bundle tool, or SSH-backed warp device
-  loop; the architecture suite currently exercises file-cache bundle and local
-  hot-swap targets
+- a lock-derived composed-package-DB dev shell for the benchmark fixture, but
+  not the Backpack HLS projection; no production MSC bundle tool or SSH-backed
+  warp device loop; the architecture suite currently exercises file-cache
+  bundle and local hot-swap targets
+
+Stack project translation is not part of the STRATA product target. Cabal is
+the solver of record because the target architecture depends on Backpack-aware
+unit planning, and Stack does not model the Backpack semantics this project
+needs to preserve.
 
 The target architecture below supersedes the prototype where they conflict.
 
@@ -163,10 +172,11 @@ substitutions.
 
 ### 5. Dev Shell
 
-`nix develop` should provide pinned GHC, Cabal, HLS, external lock dependencies,
-`warp`, and `msc`.
+`nix develop` currently consumes the benchmark fixture's lock-derived project
+shell for pinned GHC, Cabal, and external package DBs. The target shell also
+includes HLS, `warp`, and `msc`.
 
-The shell uses a composed package DB for external dependencies so
+The current shell uses a composed package DB for external dependencies so
 `cabal build all` compiles only local packages. Backpack-heavy development uses
 a generated projection project for HLS and `multi-repl`, since the ecosystem
 does not load indefinite units directly.
@@ -221,10 +231,10 @@ does not prove real derivation emission, content addressing, or rebuild cutoff.
 | No committed unit lock | Unit IDs and Backpack substitutions are provisional | Use Cabal `ElaboratedInstallPlan` and canonical JSON lock emission | Golden lock is byte-stable across machines |
 | Wasm planner is a scanner | Hackage/Cabal edge cases are under-modeled | Restrict Wasm to lock lowering; move Cabal semantics into lock tool | Wasm and Nix lowerers are golden-equal on lock fixtures |
 | Planner emits `*.drv.plan.json`, not `.drv` files | Builds cannot exercise dynamic derivations or cutoff | Implement `nix derivation add` emission and `builtins.outputOf` consumption | Probe chain builds from planner to child drv to assemble drv |
-| No CA `iface`/`out` split | Body-only dependency edits still risk downstream rebuilds | Implement CA unit builder and composed `dbIface`/`dbFull` package DBs | Body-only edit changes `out` but leaves downstream compiles cut off |
+| CA `iface`/`out` split is only proven for ordinary lock-backed local units | Hackage, Backpack, and module-granular paths can still rebuild more than necessary | Extend the split builder contract to the remaining unit classes | Body-only edits cut off downstream compiles across each supported unit class |
 | Module backend does not build modules | Incremental rebuild promise is untested | Add planner derivation, per-module drvs, and assemble drv | 30-module fixture rebuilds one module plus assemble on body edit |
 | Backpack data is prototype-level | Instantiation rebuild scope may be wrong | Lock indefinite and instantiation units from Cabal internals | Backpack matrix passes: impl body, impl interface, and hsig edits rebuild only expected nodes |
-| Dev shell lacks lock-backed external DB | Local development can rebuild external packages | Compose shell package DB from external locked units | `nix develop` then `cabal build all` compiles zero external packages |
+| Dev shell lacks Backpack projection | Ordinary local development can use a composed package DB, but Backpack-heavy HLS and multi-repl workflows are not represented | Generate HLS/multi-repl projection from lock units after Backpack lock data is real | Projection smoke test exposes indefinite and instantiated units without rebuilding external packages |
 | No device boundary tools | Embedded iteration still requires ad hoc deploys | Add `msc`, `warp`, and `devOverlay` after unit builder | VM install/deploy/swap tests pass with no experimental features on device |
 | Experimental features are not probed | Nix upgrades can silently break primitives | Vendor dynamic-derivation probes and run on every Nix bump | P1-P7 probe suite is green on dev box, CI, and remote builder |
 
@@ -315,6 +325,10 @@ The required architecture functionality gap benchmark is:
 
 - `nix run .#bench-architecture-functionality -- --keep-going`
 
+The dynamic-derivation primitive probe benchmark is:
+
+- `nix run .#bench-dynamic-probes`
+
 The phase benchmark reads `tests/architecture/phase-matrix.json` and records
 eval plus `nix build` timings for penance and haskell.nix phase targets. Rows
 marked `comparison` are equivalent real builds. Rows marked `failing` are
@@ -328,20 +342,30 @@ CI and benchmark output.
 
 The functionality benchmark reads
 `tests/architecture/functionality-gap-matrix.json`. It keeps required
-architecture work that is not yet represented by a passing benchmark as
-`failing` rows, excluding the extra M0 primitive-probe work.
+architecture work visible as failing rows until a real proof target exists, and
+converted rows stay there as comparison rows. The dynamic-probes runner now
+covers the M0 P2/P3 text-hash planner and `builtins.outputOf` chain, the P4
+recursive-nix `add-path` probe, the P5 local content-addressed cutoff toy, the
+P7 salted planner determinism comparison, the M2 `dbIface`/`dbFull` cutoff
+matrix for the lock-built benchmark library and executable consumer, and the M3
+`.hi` determinism soak. The `M4-dynamic-derivation-emission` row now builds the
+real benchmark dyndrv emission proof. `M4-module-cutoff-30` builds the committed
+thirty-module dyndrv fixture against a haskell.nix build of the same executable,
+while rebuild-scenarios enforce the body/edit/no-op exact event sets.
+`M4-hs-boot-th-classification` proves hs-boot ordering and Template Haskell
+`dbFull` classification through the module planner, with a rebuild-scenarios row
+covering the splice dependency body-edit cutoff. The P6 remote-builder probe
+stays visible as a functionality gap.
 
 They must be hardened by architecture-gating tests before cutover:
 
 - full lock determinism beyond the benchmark `penance-lock --check`
 - wasm-vs-Nix lowerer equality
-- no-IFD flake check
-- unit-builder cutoff matrix
-- module-planner dynamic-derivation probes beyond the current `ghc -M`
-  per-module target
 - Backpack rebuild matrix
-- dev shell external-package suppression
+- dev shell HLS and multi-repl projection beyond the current external-package
+  suppression smoke
 - MSC install in a VM with no experimental features beyond the current
   file-cache bundle target
 - warp Tier 0 and Tier 1 VM tests beyond the current local hot-swap target
-- weekly kill-switch matrix
+- kill-switch axes beyond the current granularity unit/module output-equivalence
+  proof

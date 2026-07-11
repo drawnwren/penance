@@ -1,0 +1,4 @@
+module B
+decl: doubled :: Int
+body: doubled = A.value + A.value
+comment: depends on A interface

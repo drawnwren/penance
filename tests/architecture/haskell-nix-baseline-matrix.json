@@ -20,11 +20,11 @@
       "title": "Cabal component derivations",
       "status": "comparison",
       "comparison": "penance-component-build-vs-haskell-nix-component-build",
-      "penanceAttr": "penanceBenchReal",
+      "penanceAttr": "penanceBenchViaLock",
       "haskellNixAttr": "haskellNixBenchExe",
       "required": true,
       "failure": null,
-      "notes": "Tracks the advertised component-derivation baseline for an executable component."
+      "notes": "Tracks the advertised component-derivation baseline with the lock-built penance benchmark executable from penanceProject."
     },
     {
       "id": "HN-backpack-build",
@@ -39,100 +39,88 @@
       "notes": "Tracks Backpack build parity on the local multi-instantiation fixture."
     },
     {
-      "id": "HN-stack-project",
-      "milestone": "HN",
-      "title": "Stack project translation",
-      "status": "failing",
-      "comparison": "stack-project-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
-      "required": true,
-      "failure": "haskell.nix advertises Stack project translation through project' / stackProject'; penance intentionally has no Stack parser or benchmark fixture yet.",
-      "notes": "Add a Stack fixture and a penance lock path or mark Stack unsupported by explicit product decision."
-    },
-    {
       "id": "HN-hackage-package-set",
       "milestone": "HN",
       "title": "Hackage package-set builds",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "hackage-package-set-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
+      "penanceAttr": "penanceHackageStateVar",
+      "haskellNixAttr": "haskellNixHackageStateVar",
       "required": true,
-      "failure": "haskell.nix ships hackage.nix-backed package sets; penance only has surface validation smoke tests and no lock-backed Hackage unit builder benchmark.",
-      "notes": "Turn this into a comparison when penance can lock and build a selected Hackage package and dependency closure."
+      "failure": null,
+      "notes": "Builds pinned StateVar-1.2.2 from Hackage on the penance package-set lane and compares it with haskell.nix hackage-package."
     },
     {
       "id": "HN-stackage-snapshot",
       "milestone": "HN",
       "title": "Stackage snapshot package-set builds",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "stackage-snapshot-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
+      "penanceAttr": "penanceStackageStateVar",
+      "haskellNixAttr": "haskellNixStackageStateVar",
       "required": true,
-      "failure": "haskell.nix ships stackage.nix snapshots; penance has a Stackage closure benchmark but no STRATA snapshot lock or build path.",
-      "notes": "Turn this into a comparison when snapshot.yaml generation and lock-backed Stackage builds exist."
+      "failure": null,
+      "notes": "Parses StateVar's version from the pinned lts-24.41 Stackage snapshot on the penance lane, verifies the built package matches that resolved version, and compares it with haskell.nix snapshots.lts-24.41.StateVar."
     },
     {
       "id": "HN-shell-for",
       "milestone": "HN",
       "title": "shellFor development environment",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "shell-for-parity",
-      "penanceAttr": null,
+      "penanceAttr": "penanceBenchShell",
       "haskellNixAttr": "haskellNixBenchShell",
       "required": true,
-      "failure": "haskell.nix exposes shellFor, ghcWithPackages, and ghcWithHoogle; penance does not yet expose a lock-backed dev shell or HLS projection.",
-      "notes": "Turn this into a comparison when devShells.<system>.default is backed by external package DB composition."
+      "failure": null,
+      "notes": "Uses the same ghcWithPackages-composed GHC package DB as devShells.default, proves cabal build all compiles the fixture without external dependency builds, and compares it with haskell.nix shellFor."
     },
     {
       "id": "HN-project-cross",
       "milestone": "HN",
       "title": "Haskell project cross compilation",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "project-cross-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
+      "penanceAttr": "penanceHaskellAarch64LinuxReal",
+      "haskellNixAttr": "haskellNixProjectCrossAarch64",
       "required": true,
-      "failure": "haskell.nix exposes projectCross for Haskell projects; penance currently benchmarks only a C-level aarch64 ELF probe, not a full cross Haskell project.",
-      "notes": "Turn this into a comparison when the aarch64-linux Haskell fixture builds through the target toolchain lane."
+      "failure": null,
+      "notes": "Builds the cross-hello Haskell executable as an aarch64-linux ELF through the raw cross-GHC lane and compares it with haskell.nix projectCross.aarch64-multiplatform. Both lanes intentionally share the same raw cross-GHC; this row measures raw invocation versus haskell.nix projectCross and Setup machinery, not a second haskell.nix compiler bootstrap."
     },
     {
       "id": "HN-project-variants-overrides",
       "milestone": "HN",
       "title": "Project variants, modules, and overrides",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "project-variants-overrides-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
+      "penanceAttr": "penanceProjectVariants",
+      "haskellNixAttr": "haskellNixProjectVariants",
       "required": true,
-      "failure": "haskell.nix exposes projectVariants, appendModule, extend, overlays, modules, and extras; penance does not yet have an equivalent override/materialization benchmark.",
-      "notes": "Turn this into a comparison when STRATA lock overrides and kill-switch variants are benchmarked."
+      "failure": null,
+      "notes": "Builds penance unit and dyndrv module artifacts from the same committed lock, byte-compares their run outputs in penanceProjectVariants, includes a real ghcOptions-O0 override variant, and compares the bundle with a haskell.nix appendModule GHC-options variant bundle."
     },
     {
       "id": "HN-tests-benches-checks",
       "milestone": "HN",
       "title": "Tests, benchmarks, and checks collection",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "tests-benches-checks-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
+      "penanceAttr": "penanceBenchChecks",
+      "haskellNixAttr": "haskellNixBenchChecks",
       "required": true,
-      "failure": "haskell.nix exposes test, benchmark, and check collection helpers; penance has no benchmark fixture proving these component classes end to end.",
-      "notes": "Turn this into a comparison when the fixture contains tests and benchmarks and penance exposes matching build/check attrs."
+      "failure": null,
+      "notes": "Builds and runs the fixture test suite and benchmark on the penance raw-GHC path and on haskell.nix components.tests / components.benchmarks outputs."
     },
     {
       "id": "HN-materialization-cache",
       "milestone": "HN",
       "title": "Plan materialization and cache workflow",
-      "status": "failing",
+      "status": "comparison",
       "comparison": "materialization-cache-parity",
-      "penanceAttr": null,
-      "haskellNixAttr": null,
+      "penanceAttr": "penanceLockCacheManifest",
+      "haskellNixAttr": "haskellNixBenchPlanMaterialized",
       "required": true,
-      "failure": "haskell.nix supports materialized plan outputs and cache-oriented workflows; penance still lacks the CA realisation / cache-anchor parity benchmark.",
-      "notes": "Turn this into a comparison when M3 cache realisation or anchor fallback is implemented and measured."
+      "failure": null,
+      "notes": "Builds a penance cache manifest keyed by the committed strata.lock hash and root drv path, and compares it with a haskell.nix project whose plan-nix is supplied through the materialized argument."
     }
   ]
 }

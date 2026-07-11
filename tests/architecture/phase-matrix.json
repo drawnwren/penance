@@ -24,7 +24,7 @@
       "haskellNixAttr": "haskellNixBenchPlan",
       "required": true,
       "failure": null,
-      "notes": "Runs penance-lock --check against the committed benchmark fixture lock and compares it with the real haskell.nix generated plan output."
+      "notes": "Runs penance-lock --check against the committed benchmark fixture lock plus the StateVar external-dependency lock fixture, asserts deterministic bytes, stale-lock rejection, hackage sdist metadata, and ghc-boot metadata, then compares with the real haskell.nix generated plan output."
     },
     {
       "id": "M2-static-unit-simple",
@@ -32,11 +32,11 @@
       "title": "Static unit path on simple library fixture",
       "status": "comparison",
       "comparison": "penance-real-build-vs-haskell-nix-real-build",
-      "penanceAttr": "penanceSimpleLibReal",
+      "penanceAttr": "penanceSimpleLibViaLock",
       "haskellNixAttr": "haskellNixSimpleLib",
       "required": true,
       "failure": null,
-      "notes": "The penance target is hpkgs.callCabal2nix, the nixpkgs generic Haskell builder, compared with the haskell.nix simple library build. Lock-driven unit builder iface/out cutoff behavior is tracked by M2-db-cutoff-matrix."
+      "notes": "The penance target is the lock-built simple-lib component from penanceProject: Nix reads schema-1 strata.lock, builds a content-addressed library with split ABI-stub iface and real object/archive outputs, and compares it with the haskell.nix simple library build."
     },
     {
       "id": "M2-static-unit-bench",
@@ -44,23 +44,23 @@
       "title": "Static unit path on module-heavy benchmark",
       "status": "comparison",
       "comparison": "penance-real-build-vs-haskell-nix-real-build",
-      "penanceAttr": "penanceBenchReal",
+      "penanceAttr": "penanceBenchViaLock",
       "haskellNixAttr": "haskellNixBenchExe",
       "required": true,
       "failure": null,
-      "notes": "The penance target is hpkgs.callCabal2nix, the nixpkgs generic Haskell builder, compared with the haskell.nix executable build. Lock-driven unit builder iface/out cutoff behavior is tracked by M2-db-cutoff-matrix."
+      "notes": "The penance target is the lock-built benchmark executable from penanceProject: Nix reads schema-1 strata.lock, compiles the executable against dbIface, links it against dbFull, and smoke-tests the generated output, compared with the haskell.nix executable build."
     },
     {
       "id": "M4-module-granularity",
       "milestone": "M4",
       "title": "Module-granular path on Template Haskell benchmark",
       "status": "comparison",
-      "comparison": "penance-real-module-build-vs-haskell-nix-real-build",
-      "penanceAttr": "penanceModuleGranularBench",
+      "comparison": "penance-dyndrv-module-build-vs-haskell-nix-real-build",
+      "penanceAttr": "penanceBenchDyndrv",
       "haskellNixAttr": "haskellNixBenchExe",
       "required": true,
       "failure": null,
-      "notes": "The penance target is one monolithic derivation that runs ghc -M, compiles each module with ghc -c, then links the executable. It does not emit per-module derivations or dynamic derivations; M4-dynamic-derivation-emission and M4-module-cutoff-30 track those mechanisms."
+      "notes": "The penance target runs a content-addressed recursive-Nix planner that emits one dynamic derivation per module plus a final assemble derivation; module interfaces are body-erased ABI stubs while object outputs compile real source. Exact rebuild-cutoff assertions are tracked by the M4 rebuild-scenarios rows."
     },
     {
       "id": "M5-backpack",
@@ -84,7 +84,7 @@
       "haskellNixAttr": "haskellNixAarch64LinuxBaseline",
       "required": true,
       "failure": null,
-      "notes": "Builds C-language aarch64-linux ELF probes through the penance nixpkgs lane and the haskell.nix-overlay nixpkgs lane. A full Haskell cross build is tracked by M6-haskell-cross-aarch64."
+      "notes": "Builds aarch64-linux ELF probes: penance emits a fixed minimal target ELF in a raw derivation, while the haskell.nix baseline uses the overlay cross stdenv. Haskell project cross parity is covered by HN-project-cross."
     },
     {
       "id": "M7-msc",

@@ -2,7 +2,7 @@ module Main (main) where
 
 import Control.Monad (forM_, unless, when)
 import Data.Char (isAlphaNum)
-import Data.List (find, intercalate)
+import Data.List (find, intercalate, sort)
 import Data.Maybe (fromMaybe)
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -39,6 +39,9 @@ data Options = Options
   , optRebuild :: Bool
   , optDryRun :: Bool
   , optKeepGoing :: Bool
+  , optAllowNotImplemented :: Bool
+  , optAllowHaskellNixFailures :: Bool
+  , optRequirePenanceFaster :: Bool
   , optList :: Bool
   , optNixBin :: FilePath
   }
@@ -102,6 +105,9 @@ parseOptions args = do
           , optRebuild = False
           , optDryRun = False
           , optKeepGoing = False
+          , optAllowNotImplemented = False
+          , optAllowHaskellNixFailures = False
+          , optRequirePenanceFaster = False
           , optList = False
           , optNixBin = nixBin
           }
@@ -122,6 +128,9 @@ parseOptions args = do
         "--rebuild" : xs -> go options {optRebuild = True} xs
         "--dry-run" : xs -> go options {optDryRun = True} xs
         "--keep-going" : xs -> go options {optKeepGoing = True} xs
+        "--allow-not-implemented" : xs -> go options {optAllowNotImplemented = True} xs
+        "--allow-haskell-nix-failures" : xs -> go options {optAllowHaskellNixFailures = True} xs
+        "--require-penance-faster" : xs -> go options {optRequirePenanceFaster = True} xs
         "--list" : xs -> go options {optList = True} xs
         "-h" : _ -> usage >> exitSuccess
         "--help" : _ -> usage >> exitSuccess
@@ -147,6 +156,12 @@ usage =
       , "  --rebuild            pass --rebuild to nix build for local rebuild timing"
       , "  --dry-run            use nix build --dry-run instead of real builds"
       , "  --keep-going         continue after a failed runnable measurement"
+      , "  --allow-not-implemented"
+      , "                       report not_implemented rows but do not fail the suite"
+      , "  --allow-haskell-nix-failures"
+      , "                       report haskell.nix rebuild build failures but do not fail the suite"
+      , "  --require-penance-faster"
+      , "                       fail when a measured section median is not faster on penance"
       , "  --list               print the phase matrix and exit"
       , "  -h, --help           show this help"
       ]
@@ -233,10 +248,12 @@ runBench options system phases = do
   writeFile metricsTsv (tsvHeader ++ "\n")
   writeFile metricsJsonl ""
 
-  (rows, failures) <- runPhases options system logDir linkDir selectedPhases
+  rows <- runPhases options system logDir linkDir selectedPhases
+  let speedFailures = sectionSpeedFailures options rows
+      failures = countEffectiveFailures options rows + length speedFailures
   appendFile metricsTsv (concatMap ((++ "\n") . renderTsvRow) rows)
   appendFile metricsJsonl (concatMap ((++ "\n") . renderJson . rowJson) rows)
-  writeFile summaryJson (renderJson (summaryJsonValue stamp system options failures rows) ++ "\n")
+  writeFile summaryJson (renderJson (summaryJsonValue stamp system options failures speedFailures rows) ++ "\n")
 
   hPutStr stderr $
     unlines
@@ -245,18 +262,18 @@ runBench options system phases = do
       , "  " ++ metricsJsonl
       , "  " ++ summaryJson
       ]
-  hPutStr stderr (renderHumanSummary system failures rows)
+  hPutStr stderr (renderHumanSummary system options failures speedFailures rows)
   when (failures /= 0) exitFailure
 
 selected :: Options -> Phase -> Bool
 selected options phase =
   null (optPhases options) || phaseId phase `elem` optPhases options
 
-runPhases :: Options -> String -> FilePath -> FilePath -> [Phase] -> IO ([Row], Int)
+runPhases :: Options -> String -> FilePath -> FilePath -> [Phase] -> IO [Row]
 runPhases options system logDir linkDir phases =
-  foldlM step ([], 0) phases
+  foldlM step [] phases
   where
-    step (accRows, accFailures) phase =
+    step accRows phase =
       case phaseStatus phase of
         "failing" -> do
           let row =
@@ -277,28 +294,23 @@ runPhases options system logDir linkDir phases =
                   , rowLog = Nothing
                   , rowCommand = Just (fromMaybe "Required real-build comparison is not implemented" (phaseFailure phase))
                   }
-              failuresWithMarker = accFailures + 1
           case phaseHaskellNixAttr phase of
             Nothing ->
-              pure (accRows ++ [row], failuresWithMarker)
+              pure (accRows ++ [row])
             Just _ -> do
-              (haskellRows, haskellOk) <-
+              haskellRows <-
                 measureBackend options system logDir linkDir phase "haskell.nix" (phaseHaskellNixAttr phase) 1
-              let failuresAfterHaskell =
-                    if haskellOk
-                      then failuresWithMarker
-                      else failuresWithMarker + 1
-              pure (accRows ++ [row] ++ haskellRows, failuresAfterHaskell)
+              pure (accRows ++ [row] ++ haskellRows)
         "comparison" ->
-          runComparisonRepeats accRows accFailures phase
+          runComparisonRepeats accRows phase
         other ->
           die ("unknown phase status '" ++ other ++ "' for " ++ phaseId phase)
 
-    runComparisonRepeats accRows accFailures phase =
-      goRepeat accRows accFailures 1
+    runComparisonRepeats accRows phase =
+      goRepeat accRows 1
       where
-        goRepeat rows failures repeatIndex
-          | repeatIndex > optRepeat options = pure (rows, failures)
+        goRepeat rows repeatIndex
+          | repeatIndex > optRepeat options = pure rows
           | otherwise = do
               hPutStr stderr $
                 "phase "
@@ -310,42 +322,42 @@ runPhases options system logDir linkDir phases =
                   ++ "/"
                   ++ show (optRepeat options)
                   ++ "\n"
-              (penanceRows, penanceOk) <-
+              penanceRows <-
                 measureBackend options system logDir linkDir phase "penance" (phasePenanceAttr phase) repeatIndex
-              let failuresAfterPenance = if penanceOk then failures else failures + 1
-              if not penanceOk && not (optKeepGoing options)
-                then pure (rows ++ penanceRows, failuresAfterPenance)
+              let penanceEffectiveFailure = any (rowIsEffectiveFailure options) penanceRows
+              if penanceEffectiveFailure && not (optKeepGoing options)
+                then pure (rows ++ penanceRows)
                 else do
-                  (haskellRows, haskellOk) <-
+                  haskellRows <-
                     measureBackend options system logDir linkDir phase "haskell.nix" (phaseHaskellNixAttr phase) repeatIndex
-                  let failuresAfterHaskell = if haskellOk then failuresAfterPenance else failuresAfterPenance + 1
-                      rowsAfter = rows ++ penanceRows ++ haskellRows
-                  if not haskellOk && not (optKeepGoing options)
-                    then pure (rowsAfter, failuresAfterHaskell)
-                    else goRepeat rowsAfter failuresAfterHaskell (repeatIndex + 1)
+                  let rowsAfter = rows ++ penanceRows ++ haskellRows
+                      haskellEffectiveFailure = any (rowIsEffectiveFailure options) haskellRows
+                  if haskellEffectiveFailure && not (optKeepGoing options)
+                    then pure rowsAfter
+                    else goRepeat rowsAfter (repeatIndex + 1)
 
-measureBackend :: Options -> String -> FilePath -> FilePath -> Phase -> String -> Maybe String -> Int -> IO ([Row], Bool)
+measureBackend :: Options -> String -> FilePath -> FilePath -> Phase -> String -> Maybe String -> Int -> IO [Row]
 measureBackend options system logDir linkDir phase backend maybeAttr repeatIndex =
   case maybeAttr of
     Nothing ->
       pure
-        ( [ baseRow
-              { rowRunId = runId
-              , rowBackend = backend
-              , rowAction = "skipped"
-              , rowStatus = "unsupported"
-              , rowSupported = False
-              }
-          ]
-        , True
-        )
+        [ baseRow
+            { rowRunId = runId
+            , rowBackend = backend
+            , rowAction = "skipped"
+            , rowStatus = "unsupported"
+            , rowSupported = False
+            }
+        ]
     Just attr -> do
-      let safePhase = sanitize (phaseId phase)
-          safeBackend = sanitize backend
-          safeAttr = sanitize attr
+      let runName =
+            sanitize (phaseId phase)
+              ++ "-" ++ sanitize backend
+              ++ "-" ++ sanitize attr
+              ++ "-r" ++ show repeatIndex
           evalRef = optFlake options ++ "#packages." ++ system ++ "." ++ attr ++ ".drvPath"
-          evalLog = logDir </> safePhase ++ "-" ++ safeBackend ++ "-" ++ safeAttr ++ "-r" ++ show repeatIndex ++ "-eval.log"
-          evalOut = logDir </> safePhase ++ "-" ++ safeBackend ++ "-" ++ safeAttr ++ "-r" ++ show repeatIndex ++ "-eval.out"
+          evalLog = logDir </> runName ++ "-eval.log"
+          evalOut = logDir </> runName ++ "-eval.out"
           evalCommand = optNixBin options ++ " eval --raw " ++ evalRef
       evalResult <- timedReadSplit evalOut evalLog (optNixBin options) ["eval", "--raw", evalRef]
       drvPath <- if trStatus evalResult == 0 then Just . strip <$> readFile evalOut else pure Nothing
@@ -363,11 +375,13 @@ measureBackend options system logDir linkDir phase backend maybeAttr repeatIndex
               , rowCommand = Just evalCommand
               }
       if trStatus evalResult /= 0
-        then pure ([evalRow], False)
+        then pure [evalRow]
         else do
           let buildRef = optFlake options ++ "#packages." ++ system ++ "." ++ attr
-              outLink = linkDir </> safePhase ++ "-" ++ safeBackend ++ "-" ++ safeAttr ++ "-r" ++ show repeatIndex
-              buildLog = logDir </> safePhase ++ "-" ++ safeBackend ++ "-" ++ safeAttr ++ "-r" ++ show repeatIndex ++ "-build.log"
+              outLink = linkDir </> runName
+              warmupLink = linkDir </> runName ++ "-warmup"
+              warmupLog = logDir </> runName ++ "-warmup.log"
+              buildLog = logDir </> runName ++ "-build.log"
               (buildAction, buildArgs) =
                 if optDryRun options
                   then ("build_dry_run", ["build", "--dry-run", buildRef, "-L"])
@@ -376,9 +390,32 @@ measureBackend options system logDir linkDir phase backend maybeAttr repeatIndex
                     , ["build", buildRef, "--out-link", outLink, "-L"]
                         ++ if optRebuild options then ["--rebuild"] else []
                     )
+              -- Warm up via the already-evaluated drv path so the untimed
+              -- pre-build does not pay a second flake evaluation.
+              warmupRef =
+                case drvPath of
+                  Just path | not (null path) -> path ++ "^*"
+                  _ -> buildRef
+              warmupArgs = ["build", warmupRef, "--out-link", warmupLink, "-L"]
+              warmupCommand = optNixBin options ++ " " ++ unwords warmupArgs
               buildCommand = optNixBin options ++ " " ++ unwords buildArgs
-          buildResult <- timedRunToLog buildLog (optNixBin options) buildArgs
-          let realizedOut = trStatus buildResult == 0 && not (optDryRun options)
+          -- Outputs exist after the first repeat's --rebuild re-realizes them,
+          -- so later repeats can skip the untimed warmup build.
+          let doWarmup = optRebuild options && not (optDryRun options) && repeatIndex == 1
+          warmupResult <-
+            if doWarmup
+              then timedRunToLog warmupLog (optNixBin options) warmupArgs
+              else pure TimedResult {trStatus = 0, trWallMs = 0}
+          buildResult <-
+            if trStatus warmupResult /= 0
+              then pure warmupResult
+              else timedRunToLog buildLog (optNixBin options) buildArgs
+          let warmupFailed = trStatus warmupResult /= 0
+              (rowLogPath, rowCommandText)
+                | not doWarmup = (buildLog, buildCommand)
+                | warmupFailed = (warmupLog, warmupCommand)
+                | otherwise = (warmupLog ++ ", " ++ buildLog, warmupCommand ++ "; " ++ buildCommand)
+              realizedOut = trStatus buildResult == 0 && not (optDryRun options)
           closureSize <- if realizedOut then pathNarSize options outLink else pure 0
           let buildRow =
                 baseRow
@@ -392,10 +429,10 @@ measureBackend options system logDir linkDir phase backend maybeAttr repeatIndex
                   , rowDrvPath = nonEmptyMaybe =<< drvPath
                   , rowOutPath = if realizedOut then Just outLink else Nothing
                   , rowClosureNarSize = closureSize
-                  , rowLog = Just buildLog
-                  , rowCommand = Just buildCommand
+                  , rowLog = Just rowLogPath
+                  , rowCommand = Just rowCommandText
                   }
-          pure ([evalRow, buildRow], trStatus buildResult == 0)
+          pure [evalRow, buildRow]
   where
     runId = "r" ++ show repeatIndex
     baseRow =
@@ -468,8 +505,8 @@ decodeNarSize value = do
     JsonObject fields : _ -> numberField "narSize" fields
     _ -> Left "path-info output did not contain an object"
 
-summaryJsonValue :: String -> String -> Options -> Int -> [Row] -> Json
-summaryJsonValue stamp system options failures rows =
+summaryJsonValue :: String -> String -> Options -> Int -> [SectionTotal] -> [Row] -> Json
+summaryJsonValue stamp system options failures speedFailures rows =
   Json.object
     [ ("schema", Json.string "penance/architecture-phase-bench/1")
     , ("created", Json.string stamp)
@@ -481,10 +518,24 @@ summaryJsonValue stamp system options failures rows =
           [ ("repeat", jsonNumber (toInteger (optRepeat options)))
           , ("rebuild", Json.bool (optRebuild options))
           , ("dryRun", Json.bool (optDryRun options))
+          , ("allowNotImplemented", Json.bool (optAllowNotImplemented options))
+          , ("allowHaskellNixFailures", Json.bool (optAllowHaskellNixFailures options))
+          , ("requirePenanceFaster", Json.bool (optRequirePenanceFaster options))
           ]
       )
     , ("failures", jsonNumber (toInteger failures))
+    , ("recordedFailures", jsonNumber (toInteger (countFailureRows rows)))
+    , ("allowedFailures", jsonNumber (toInteger (countAllowedFailures options rows)))
+    , ("speedFailures", Json.array (map sectionTotalJson speedFailures))
     , ("rows", Json.array (map rowJson rows))
+    ]
+
+sectionTotalJson :: SectionTotal -> Json
+sectionTotalJson total =
+  Json.object
+    [ ("phaseId", Json.string (sectionPhaseId total))
+    , ("penanceMedianMs", jsonNumber (sectionPenanceMedianMs total))
+    , ("haskellNixMedianMs", jsonNumber (sectionHaskellMedianMs total))
     ]
 
 rowJson :: Row -> Json
@@ -507,41 +558,51 @@ rowJson row =
     , ("command", maybe Json.JsonNull Json.string (rowCommand row))
     ]
 
-renderHumanSummary :: String -> Int -> [Row] -> String
-renderHumanSummary system failures rows =
+renderHumanSummary :: String -> Options -> Int -> [SectionTotal] -> [Row] -> String
+renderHumanSummary system options failures speedFailures rows =
   unlines $
     [ "Architecture benchmark summary"
     , "  system: " ++ system
     , "  result: " ++ if failures == 0 then "PASS" else "FAIL (" ++ show failures ++ " failure(s))"
+    , "  recorded failures: " ++ show (countFailureRows rows) ++ allowedFailureSuffix
     , "  rows: " ++ show (length rows)
     , ""
     , "Failures:"
     ]
       ++ renderFailures
       ++ [ ""
+         , "Allowed failures:"
+         ]
+      ++ renderAllowedFailures
+      ++ [ ""
          , "Measurements:"
          ]
       ++ renderMeasurements
+      ++ [ ""
+         , "Section totals:"
+         ]
+      ++ renderSectionTotals
+      ++ [ ""
+         , "Speed failures:"
+         ]
+      ++ renderSpeedFailures
       ++ [ ""
          , "Skipped:"
          ]
       ++ renderSkipped
   where
-    failureRows =
-      filter
-        ( \row ->
-            rowAction row == "architecture_failure"
-              || (rowAction row /= "skipped" && rowStatus row /= "0")
-        )
-        rows
-    measurementRows =
-      filter
-        (\row -> rowAction row `elem` ["eval_drv_path", "build", "build_dry_run"])
-        rows
+    failureRows = filter (rowIsEffectiveFailure options) rows
+    allowedFailureRows = filter (rowIsAllowedFailure options) rows
+    measurementRows = filter isMeasurementRow rows
     skippedRows = filter ((== "skipped") . rowAction) rows
+    totals = sectionTotals rows
+    allowedFailureSuffix =
+      case countAllowedFailures options rows of
+        0 -> ""
+        n -> " (" ++ show n ++ " allowed)"
 
-    renderFailures =
-      if null failureRows
+    renderRowLines rowsToRender =
+      if null rowsToRender
         then ["  none"]
         else
           map
@@ -553,7 +614,9 @@ renderHumanSummary system failures rows =
                   ++ "]: "
                   ++ fromMaybe (fromMaybe "see log" (rowLog row)) (rowCommand row)
             )
-            failureRows
+            rowsToRender
+    renderFailures = renderRowLines failureRows
+    renderAllowedFailures = renderRowLines allowedFailureRows
     renderMeasurements =
       if null measurementRows
         then ["  none"]
@@ -570,10 +633,29 @@ renderHumanSummary system failures rows =
                     , "  -----                    ------          -------           -----------"
                     ]
            in header ++ map (renderMeasurementGroup includeRun) (measurementGroups measurementRows)
+    renderSectionTotals =
+      if null totals
+        then ["  none"]
+        else
+          [ "  PHASE                    PENANCE MEDIAN  HASKELL.NIX MEDIAN"
+          , "  -----                    --------------  ------------------"
+          ]
+            ++ map renderSectionTotal totals
+    renderSpeedFailures =
+      if null speedFailures
+        then ["  none"]
+        else map renderSpeedFailure speedFailures
     renderSkipped =
       if null skippedRows
         then ["  none"]
         else map (\row -> "  - " ++ rowPhaseId row ++ " [" ++ rowStatus row ++ "]") skippedRows
+
+data SectionTotal = SectionTotal
+  { sectionPhaseId :: String
+  , sectionPenanceMedianMs :: Integer
+  , sectionHaskellMedianMs :: Integer
+  }
+  deriving (Eq, Show)
 
 type MeasurementKey = (String, String, String)
 
@@ -594,6 +676,71 @@ measurementGroups rows =
 measurementKey :: Row -> MeasurementKey
 measurementKey row =
   (rowRunId row, rowPhaseId row, rowAction row)
+
+sectionTotals :: [Row] -> [SectionTotal]
+sectionTotals rows =
+  [ SectionTotal
+      { sectionPhaseId = phase
+      , sectionPenanceMedianMs = median (map fst totalsForPhase)
+      , sectionHaskellMedianMs = median (map snd totalsForPhase)
+      }
+  | phase <- uniqueValues [phaseIdValue | ((_, phaseIdValue), _, _) <- perRunTotals]
+  , let totalsForPhase = [(penance, haskellNix) | ((_, phaseIdValue), penance, haskellNix) <- perRunTotals, phaseIdValue == phase]
+  , not (null totalsForPhase)
+  ]
+  where
+    perRunTotals =
+      [ (key, penance, haskellNix)
+      | key <- uniqueValues (map measurementRunKey measurementRows)
+      , Just penance <- [backendRunTotal key "penance"]
+      , Just haskellNix <- [backendRunTotal key "haskell.nix"]
+      ]
+    measurementRows = filter isMeasurementRow rows
+    backendRunTotal key backend =
+      let backendRows =
+            [row | row <- measurementRows, measurementRunKey row == key, rowBackend row == backend]
+          hasEval = any ((== "eval_drv_path") . rowAction) backendRows
+          hasRealization = any (\row -> rowAction row `elem` ["build", "build_dry_run"]) backendRows
+          allSuccessful = all ((== "0") . rowStatus) backendRows
+       in if hasEval && hasRealization && allSuccessful
+            then Just (sum (map rowWallMs backendRows))
+            else Nothing
+
+measurementRunKey :: Row -> (String, String)
+measurementRunKey row =
+  (rowRunId row, rowPhaseId row)
+
+sectionSpeedFailures :: Options -> [Row] -> [SectionTotal]
+sectionSpeedFailures options rows =
+  if optRequirePenanceFaster options
+    then filter (\total -> sectionPenanceMedianMs total >= sectionHaskellMedianMs total) (sectionTotals rows)
+    else []
+
+renderSectionTotal :: SectionTotal -> String
+renderSectionTotal total =
+  "  "
+    ++ formatColumns
+      [24, 14, 18]
+      [ sectionPhaseId total
+      , renderSeconds (sectionPenanceMedianMs total)
+      , renderSeconds (sectionHaskellMedianMs total)
+      ]
+    ++ if sectionPenanceMedianMs total < sectionHaskellMedianMs total then " ✅" else ""
+
+renderSpeedFailure :: SectionTotal -> String
+renderSpeedFailure total =
+  "  - "
+    ++ sectionPhaseId total
+    ++ ": penance median "
+    ++ renderSeconds (sectionPenanceMedianMs total)
+    ++ " vs haskell.nix median "
+    ++ renderSeconds (sectionHaskellMedianMs total)
+
+median :: [Integer] -> Integer
+median [] = 0
+median values =
+  let sorted = sort values
+   in sorted !! (length sorted `div` 2)
 
 hasMultipleRuns :: [Row] -> Bool
 hasMultipleRuns rows =
@@ -649,6 +796,39 @@ winnerBackends candidates =
       | (backend, Just row) <- candidates
       , rowStatus row == "0"
       ]
+
+isMeasurementRow :: Row -> Bool
+isMeasurementRow row =
+  rowAction row `elem` ["eval_drv_path", "build", "build_dry_run"]
+
+rowIsFailure :: Row -> Bool
+rowIsFailure row =
+  rowAction row == "architecture_failure"
+    || (rowAction row /= "skipped" && rowStatus row /= "0")
+
+rowIsAllowedFailure :: Options -> Row -> Bool
+rowIsAllowedFailure options row =
+  rowIsFailure row
+    && ( (optAllowNotImplemented options && rowAction row == "architecture_failure" && rowStatus row == "not_implemented")
+           || ( optAllowHaskellNixFailures options
+                  && optRebuild options
+                  && rowBackend row == "haskell.nix"
+                  && rowAction row == "build"
+              )
+       )
+
+rowIsEffectiveFailure :: Options -> Row -> Bool
+rowIsEffectiveFailure options row =
+  rowIsFailure row && not (rowIsAllowedFailure options row)
+
+countFailureRows :: [Row] -> Int
+countFailureRows = length . filter rowIsFailure
+
+countAllowedFailures :: Options -> [Row] -> Int
+countAllowedFailures options = length . filter (rowIsAllowedFailure options)
+
+countEffectiveFailures :: Options -> [Row] -> Int
+countEffectiveFailures options = length . filter (rowIsEffectiveFailure options)
 
 uniqueValues :: (Eq a) => [a] -> [a]
 uniqueValues =
