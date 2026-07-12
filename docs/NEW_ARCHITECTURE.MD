@@ -1,6 +1,6 @@
-# STRATA — a haskell.nix replacement for a Backpack-heavy embedded NixOS monorepo
+# Penance — a haskell.nix replacement for a Backpack-heavy embedded NixOS monorepo
 
-**Status:** implementation spec v2 · **Audience:** implementing engineers (written to be executable by a junior dev with review) · **Nix:** Determinate Nix, pinned release (see Appendix A) · **Working name:** `strata` (lock → eval → build layers)
+**Status:** implementation spec v2 · **Audience:** implementing engineers (written to be executable by a junior dev with review) · **Nix:** Determinate Nix, pinned release (see Appendix A) · **Working name:** `penance` (lock → eval → build layers)
 
 This revision extends the v1 architecture with four new requirements:
 
@@ -13,10 +13,10 @@ This revision extends the v1 architecture with four new requirements:
 
 ## 0. Executive summary
 
-strata is three layers plus a fleet layer:
+penance is three layers plus a fleet layer:
 
-- **Lock layer** (`strata-lock`, a Haskell CLI linking `cabal-install` as a library): runs the cabal solver at *commit time*, elaborates the install plan down to **units** (components + Backpack instantiations), and writes a deterministic `strata.lock`. No IFD, ever.
-- **Eval layer** (`strata-nix` + `strata-lower.wasm`): Nix consumes the lock via `builtins.wasm` (pure-Nix `fromJSON` fallback behind a flag) and lowers it to derivations in milliseconds-to-seconds instead of haskell.nix's minutes. Determinate Nix `parallel-eval` and lazy trees are enabled.
+- **Lock layer** (`repent`, a Haskell CLI linking `cabal-install` as a library): runs the cabal solver at *commit time*, elaborates the install plan down to **units** (components + Backpack instantiations), and writes a deterministic `penance.lock`. No IFD, ever.
+- **Eval layer** (`penance-nix` + `penance-lower.wasm`): Nix consumes the lock via `builtins.wasm` (pure-Nix `fromJSON` fallback behind a flag) and lowers it to derivations in milliseconds-to-seconds instead of haskell.nix's minutes. Determinate Nix `parallel-eval` and lazy trees are enabled.
 - **Build layer**: every Haskell unit is a **content-addressed** derivation with split `iface`/`out` outputs for ABI-level early cutoff. **Local, non-Backpack units are built at module granularity via dynamic derivations**: a per-unit planner derivation runs `ghc -M`, emits one CA derivation per module with `nix derivation add`, and returns the root `.drv` as its text-hashed output, consumed by `builtins.outputOf`. External (Hackage) units and Backpack units stay unit-level CA derivations.
 - **Fleet layer** (`msc` + `warp`): `msc` builds each host's `config.system.build.toplevel` and packs all hosts into one **binary-cache-layout bundle** (natural cross-host dedup, incremental regeneration, signed narinfos). `warp` is the dev loop: Tier 0 pushes a closure *delta* to one device over `ssh-ng` and runs `switch-to-configuration test`; Tier 1 hot-swaps a single service binary via a `/run` overlay in under ~10 s.
 
@@ -36,7 +36,7 @@ Kill switches (one boolean each) degrade: module→unit granularity, wasm→from
 | R4 | Backpack first-class | Lock nodes are **units** incl. instantiations; builders drive `Setup configure --cid --instantiate-with`; dev-shell "projection" for HLS |
 | R5 | MSC bundles | `msc` component; binary-cache bundle format; manifest schema |
 | R6 | Fast device mirroring | `warp` Tier 0/1; `devOverlay` NixOS module |
-| R7 | Dyndrv today, no Sandstone | `strata-plan` emits drvs with `nix derivation add` inside a `recursive-nix` planner; text-hash output + `outputOf` |
+| R7 | Dyndrv today, no Sandstone | `penance-plan` emits drvs with `nix derivation add` inside a `recursive-nix` planner; text-hash output + `outputOf` |
 | R8 | Dev shells + cross + CUDA (accelerate, jetpack-nixos) | Per-target toolchain tuples in lock; native aarch64-linux builds on Mac Studios via linux-builder VM preferred over GHC cross |
 | R9 | Huge VHDL files in repo | lazy trees + `lib.fileset` per-unit sources; planner slices per-module sources at build time |
 
@@ -49,9 +49,9 @@ Non-goals: materialization compatibility; Stack support (Stack has no Backpack s
 These are the rules every component must preserve. Violating one is a design bug, not a style issue.
 
 1. **No IFD anywhere.** `nix flake check` must pass with `allow-import-from-derivation = false`.
-2. **The lock is the single source of truth.** Eval never solves, parses `.cabal` files, or globs the repo for dependencies. If it's not in `strata.lock`, it doesn't exist.
-3. **Graph nodes are units, not packages.** A unit is: an ordinary component (lib/sublib/exe/test/bench/flib), an *indefinite* Backpack library (typecheck-only), or a *fully-instantiated* Backpack library (cid + module substitution). Unit IDs are computed by `strata-lock` and are stable across machines.
-4. **Every Haskell derivation is content-addressed** (`__contentAddressed = true`) with split outputs: `iface` (`.hi`/`.hie` + compile-time pkg conf) and `out` (objects/libs + full conf). Compile steps of non-TH modules depend only on `iface` of deps. This is the early-cutoff mechanism.
+2. **The lock is the single source of truth.** Eval never solves, parses `.cabal` files, or globs the repo for dependencies. If it's not in `penance.lock`, it doesn't exist.
+3. **Graph nodes are units, not packages.** A unit is: an ordinary component (lib/sublib/exe/test/bench/flib), an *indefinite* Backpack library (typecheck-only), or a *fully-instantiated* Backpack library (cid + module substitution). Unit IDs are computed by `repent` and are stable across machines.
+4. **Every Haskell derivation is content-addressed** (`__contentAddressed = true`) with split outputs: `iface` (GHC-Wasm-canonicalized `.hi`, optional `.hie`, and compile-time pkg conf) and `out` (objects/libs + full conf). Compile steps of non-TH modules depend only on `iface` of deps. This is the early-cutoff mechanism.
 5. **Dynamic derivations are used exactly where the graph is unknown at lock time**: the module DAG inside a local unit. Unit-to-unit edges are known at lock time and are lowered statically at eval. (Dyndrv-ifying 400 Hackage packages multiplies drv count ~50× for zero dev-loop benefit and stresses an experimental scheduler; don't.)
 6. **The device boundary is input-addressed.** `system.build.toplevel`, everything in the MSC, and everything `warp` copies are ordinary resolved store paths. Devices need no experimental features and never see a realisation.
 7. **Planners are deterministic.** Same inputs ⇒ byte-identical emitted `.drv` files. Sorted maps, no timestamps, pinned env whitelist. This is tested (T-C4-1).
@@ -65,21 +65,21 @@ These are the rules every component must preserve. Violating one is a design bug
 
 ```
              ┌───────────────────────── commit time ─────────────────────────┐
- cabal.project / snapshot.yaml / strata.toml
+ cabal.project / snapshot.yaml / penance.toml
         │
         ▼
- ┌──────────────┐     strata.lock (JSON, committed)
- │ C1 strata-lock│ ──────────────┐
+ ┌──────────────┐     penance.lock (JSON, committed)
+ │ C1 repent│ ──────────────┐
  └──────────────┘                │
                                  ▼        ┌── eval time (per nix invocation) ──┐
                        ┌──────────────────────────┐
-                       │ C2 strata-nix + lower.wasm│  → flake outputs:
+                       │ C2 penance-nix + lower.wasm│  → flake outputs:
                        └──────────────────────────┘     packages.* devShells.*
-                                 │                       legacyPackages.strata.*
+                                 │                       legacyPackages.penance.*
               ┌──────────────────┼───────────────────────────────┐
               ▼                  ▼                               ▼
    ┌────────────────┐   ┌─────────────────┐            ┌─────────────────┐
-   │ C3 unit builders│   │ C4 strata-plan  │            │ C5 dev shell    │
+   │ C3 unit builders│   │ C4 penance-plan  │            │ C5 dev shell    │
    │ (Setup-driven,  │   │ (dyndrv module  │            │ (cabal hybrid,  │
    │  Backpack insts)│   │  planner)       │            │  HLS projection)│
    └────────────────┘   └─────────────────┘            └─────────────────┘
@@ -98,15 +98,15 @@ These are the rules every component must preserve. Violating one is a design bug
                       C9: CI / Cachix / Mac Studio builders
 ```
 
-Repository layout for the strata tooling itself:
+Repository layout for the Penance tooling itself:
 
 ```
-strata/
+penance/
   lock/          # C1: Haskell CLI (cabal-install as a library)
   nix/           # C2: Nix library (lower.nix, mkUnit.nix, mkPkgDb.nix, shell.nix, msc.nix)
-  lower-wasm/    # C2: Rust crate → strata-lower.wasm (committed artifact + source)
-  plan/          # C4: strata-plan (Rust or Haskell; runs inside planner drvs)
-  warp/          # C8: warp CLI (shell/Rust) + devOverlay NixOS module
+  lower-wasm/    # C2: Haskell normalizer → penance-lower.wasm via GHC wasm32-wasi
+  plan/          # C4: Haskell penance-plan; runs inside planner drvs
+  warp/          # C8: Haskell warp CLI + devOverlay NixOS module
   msc/           # C7: msc CLI
   tests/         # spike probes, golden tests, integration fixtures, benchmarks
 ```
@@ -115,16 +115,16 @@ strata/
 
 ## 4. Components
 
-### C1 — `strata-lock` (solver + elaborator)
+### C1 — `repent` (solver + elaborator)
 
 **Purpose.** Replace haskell.nix's IFD-time `plan-to-nix` with a commit-time CLI that produces a fully elaborated, unit-level lockfile.
 
-**Why cabal-as-a-library, not plan.json scraping.** `plan.json` represents Backpack instantiations only as opaque unit IDs of the form `<cid>+<hash>` and does not expose the module substitution; tooling that needs the instantiation mapping has to reverse-engineer it (this is cabal issue #6201). `strata-lock` therefore links `cabal-install`/`Cabal` and reads the **ElaboratedInstallPlan** directly, where `OpenUnitId` / `ModuleSubst` (see `Distribution.Backpack`) carry exactly the "which hole is filled by which module of which unit" data we need. `hashModuleSubst` gives us cabal-compatible instantiation hashes for unit IDs.
+**Why cabal-as-a-library, not plan.json scraping.** `plan.json` represents Backpack instantiations only as opaque unit IDs of the form `<cid>+<hash>` and does not expose the module substitution; tooling that needs the instantiation mapping has to reverse-engineer it (this is cabal issue #6201). `repent` therefore links `cabal-install`/`Cabal` and reads the **ElaboratedInstallPlan** directly, where `OpenUnitId` / `ModuleSubst` (see `Distribution.Backpack`) carry exactly the "which hole is filled by which module of which unit" data we need. `hashModuleSubst` gives us cabal-compatible instantiation hashes for unit IDs.
 
 **Inputs.**
 - `cabal.project` — the repo's local packages (globs fine; the CLI expands them).
 - `snapshot.yaml` — your curated "stackage": a constraints set (exact versions + Hackage revision per package). Generated once from your current haskell.nix snapshot by a migration script (M8).
-- `strata.toml` — strata config: GHC version(s), target list, per-target toolchain tuple `{ghc, llvm, cudaArch?}`, per-unit overrides (`granularity`, extra flags, `defaultInstantiations` for Backpack dev projection).
+- `penance.toml` — Penance config: GHC version(s), target list, per-target toolchain tuple `{ghc, llvm, cudaArch?}`, per-unit overrides (`granularity`, extra flags, `defaultInstantiations` for Backpack dev projection).
 - Hackage index state (pinned timestamp).
 
 **Algorithm.**
@@ -132,30 +132,29 @@ strata/
 2. Elaborate to units. For each unit emit: kind (`ordinary` | `indefinite` | `instantiation`), package name/version, component name, `cid`, `instantiatedWith: {SigName → {unit, module}}` (instantiations only), direct build/exe/setup deps as unit IDs, resolved flags, language/extensions, exposed modules, `hsSourceDirs`, `setupType` (`Simple`|`Custom`|`Configure`), C sources / pkgconfig / extra-libraries, and for local units the `srcRoot` relative path.
 3. Compute stable IDs: `cid = base32(sha256(canonical-json(pkg, ver, srcHash|hackageSha, flags, ghcId, targetId, sorted dep cids)))[0:20]`; instantiation `uid = cid ++ "+" ++ hashModuleSubst(subst)`.
 4. Pin sources: Hackage sdist sha256 + `.cabal` revision hash from the index; local units get `srcRoot` only (content addressed at eval by fileset, not here).
-5. Assign `granularity`: `"module"` iff local ∧ `setupType == Simple` ∧ kind == ordinary ∧ no `.hsig`/mixin-renames ∧ not overridden in `strata.toml`; else `"unit"`.
-6. Emit `strata.lock` (schema §5.1), canonical JSON (sorted keys, no floats), plus a `lockHash` self-field. Emission is deterministic (T-C1-2).
+5. Assign `granularity`: `"module"` iff local ∧ `setupType == Simple` ∧ kind == ordinary ∧ no `.hsig`/mixin-renames ∧ not overridden in `penance.toml`; else `"unit"`.
+6. Emit `penance.lock` (schema §5.1), canonical JSON (sorted keys, no floats), plus a `lockHash` self-field. Emission is deterministic (T-C1-2).
 
 **CLI.**
 ```
-strata lock                 # solve all targets, write strata.lock
-strata lock --check         # CI freshness gate: re-solve, byte-compare
-strata lock --update PKG…   # relax snapshot pins for PKG, re-solve
-strata lock --explain UID   # print why-depends within the lock
+repent                 # solve all targets, write penance.lock
+repent --check         # CI freshness gate: re-solve, byte-compare
+repent --update PKG…   # relax snapshot pins for PKG, re-solve
+repent --explain UID   # print why-depends within the lock
 ```
 
 **Notes for the implementer.** Vendor the exact `cabal-install` version as a source dep; its internal APIs move. Solve with `--enable-tests --enable-benchmarks` for local packages only. Treat `setupType == Custom` as `granularity = unit` and record the setup closure as an extra unit (`kind: setup`).
 
-### C2 — eval layer (`strata-nix` + `strata-lower.wasm`)
+### C2 — eval layer (`penance-nix` + `penance-lower.wasm`)
 
-**Purpose.** Turn `strata.lock` into derivations in O(lock size) with near-zero interpreter overhead, and present a haskell.nix-compatible flake surface.
+**Purpose.** Turn `penance.lock` into derivations in O(lock size) with near-zero interpreter overhead, and present a haskell.nix-compatible flake surface.
 
-**Lowering.** `lower.wasm` is a Rust function (built with the `nix-wasm-rust` interface, compiled to `wasm32`, the `.wasm` committed to the repo so eval never builds it) invoked as:
+**Lowering.** `lower.wasm` is a Haskell normalizer compiled with GHC's `wasm32-wasi` backend. It uses Determinate Nix's WASI calling convention (`argv[1]` for the input value ID and `env.return_to_nix` for the result), and the `.wasm` is committed so evaluation never builds it. It is invoked as:
 
 ```nix
 lowered = builtins.wasm {
-  path = ./lower-wasm/strata-lower.wasm;
-  function = "lower";
-} { lock = builtins.readFile ../strata.lock; target = system; };
+  path = ./lower-wasm/penance-lower.wasm;
+} { lock = builtins.readFile ../penance.lock; target = system; };
 ```
 
 It parses, validates `lockHash`, filters to the target, topologically sorts, resolves flag-conditional fields, and returns a flat attrset `{ units = { <uid> = {...}; }; roots = {...}; toolchain = {...}; }`. `builtins.wasm` is an experimental Determinate Nix feature (`wasm-builtin`); therefore:
@@ -172,11 +171,11 @@ Both lowerers are golden-tested against each other (T-C2-1). Enable `parallel-ev
 packages.<sys>.<name>                         # default component of local package <name>
 packages.<sys>."<pkg>:<ctype>:<cname>"        # haskell.nix-style component attrs (compat shim)
 devShells.<sys>.default                       # C5
-legacyPackages.<sys>.strata.{units,pkgdbs,toolchains,projection}
-lib.overlay                                   # final: prev: { strataPackages = ...; } for nixosConfigurations
-apps.<sys>.{warp,msc,strata-lock}
+legacyPackages.<sys>.penance.{units,pkgdbs,toolchains,projection}
+lib.overlay                                   # final: prev: { penancePackages = ...; } for nixosConfigurations
+apps.<sys>.{warp,msc,repent}
 ```
-Your `nixosConfigurations` keep referencing `pkgs.strataPackages.<name>`; only the overlay import changes during migration.
+Your `nixosConfigurations` keep referencing `pkgs.penancePackages.<name>`; only the overlay import changes during migration.
 
 ### C3 — unit builders (static, CA, Backpack-aware)
 
@@ -187,7 +186,7 @@ Your `nixosConfigurations` keep referencing `pkgs.strataPackages.<name>`; only t
 - `dbIface(unit)` = union of transitive deps' **`iface`** confs (import-dirs only). Used to *compile* non-TH modules.
 - `dbFull(unit)` = union of transitive deps' **`out`** confs (import-dirs + library-dirs). Used for TH modules, linking, and `Setup`-driven builds.
 
-Because confs live in the `iface` output and reference only `iface` paths, a dependency whose *body* changed but whose ABI (and thus `.hi` bytes and conf) did not produces an identical `iface` output under CA ⇒ identical `dbIface` ⇒ **downstream compiles are cut off**. Links still redo (correct: object code changed).
+Because confs live in the `iface` output and reference only `iface` paths, a dependency whose *body* changed but whose ABI and canonical interface payload did not produces an identical `iface` output under CA ⇒ identical `dbIface` ⇒ **downstream compiles are cut off**. Links still redo (correct: object code changed).
 
 **`mkUnit`** — generic builder. Phases (Setup-driven path, used for all `granularity = unit`):
 
@@ -204,7 +203,8 @@ buildPhase:    Setup build -j$NIX_BUILD_CORES <componentTarget>
 installPhase:  Setup install (or copy for exes)
 registerPhase (libraries):
   Setup register --gen-pkg-config=$conf
-  split: write iface output (hi tree + iface-conf with library-dirs stripped)
+  canonicalize real hi tree with penance-iface-canon (GHC-Wasm + GHC API)
+  split: write iface output (canonical hi tree + iface-conf with library-dirs stripped)
          write out   output (libs + full conf)
 ```
 
@@ -212,7 +212,7 @@ Standard `stdGhcOpts` per flavor:
 - **dev**: `-O0 -fomit-interface-pragmas -fignore-interface-pragmas -fhide-source-paths -fdiagnostics-color=never -j1-per-module`
 - **release**: `-O2 -fhide-source-paths` (no pragma omission — accept coarser cutoff; release builds are CI-only)
 
-The pragma-omission flags are what make `.hi` files a function of the *interface* rather than the optimizer's mood; they are the linchpin of module-level cutoff in dev flavor and are validated by T-C3-4.
+The pragma-omission flags keep implementation unfoldings out of the serialized payload. Raw interfaces still carry a changing source hash, so `penance-iface-canon` deserializes the real `ModIface`, replaces `mi_src_hash` with GHC's ABI hash, derives `mi_iface_hash` from the ABI plus sorted direct dependency-interface paths, and serializes the payload with the producer header intact. For Template Haskell modules, planner-staged object `UsageFile` records are removed because the same execution edges are explicit Nix inputs; user `addDependentFile` records remain. Both parts are required for module-level cutoff and are validated by T-C3-4.
 
 **Backpack specifics.**
 - `kind == indefinite`: run configure/build *without* `--instantiate-with`. GHC typechecks against signatures and produces interface artifacts only (no code — this is upstream Backpack semantics). Output: `iface` only, conf marked indefinite. Value: CI proves impls-agnostic code still typechecks, and instantiations depend on this unit's source via its `cid`.
@@ -220,7 +220,7 @@ The pragma-omission flags are what make `.hi` files a function of the *interface
 - TH restriction (upstream, document loudly): you cannot splice TH code *imported from* a still-indefinite unit; splicing from definite units into indefinite ones is fine.
 - The number of instantiation units can be large; they are ordinary lock nodes, sorted and lowered like everything else. This is why haskell.nix-style per-package modeling was never going to give you first-class Backpack: the graph's real nodes are instantiations.
 
-### C4 — `strata-plan` (module-granular dynamic derivations)
+### C4 — `penance-plan` (module-granular dynamic derivations)
 
 **Purpose.** For `granularity = "module"` units, discover the module DAG at *build* time and emit one CA derivation per module, so a one-line edit rebuilds one module (+ its true dependents + a link), not a package.
 
@@ -238,16 +238,15 @@ unitDrv = builtins.outputOf (mkPlanner {
 }).outPath "out";
 ```
 
-Inside the sandbox, `strata-plan`:
+Inside the sandbox, `penance-plan`:
 
 1. Runs `ghc -M -dep-suffix '' -include-pkg-deps` over the unit's modules against `dbIface` to get the intra-unit module DAG (parse the emitted Makefile).
 2. Classifies each module `TH?` by scanning `{-# LANGUAGE #-}` pragmas plus the unit's `default-extensions` from `UNIT_JSON` (conservative: `TemplateHaskell`, `QuasiQuotes`, ANN ⇒ TH).
 3. For each source file: `nix store add-path Foo.hs` (allowed under the restricted `recursive-nix` daemon) → a per-file CA source path. Editing one file therefore invalidates exactly one compile drv.
-4. For each module, in topo order, constructs a derivation in **JSON derivation format** and registers it: `nix derivation add < module.json` → `/nix/store/…-M.drv`. Shape:
-   - outputs: `hi` and `o`, both `{ "method": "nar", "hashAlgo": "sha256" }` (floating CA);
-   - inputSrcs: the module's source path (+ literal `.hi-boot` sources);
-   - inputDrvs: sibling module drvs (paths now exist in the store — plain references requesting output `hi`), plus `dbIface` (or `dbFull` iff TH), toolchain;
-   - builder: the pinned `ghc-module-compile` wrapper (a store path passed into the planner), args = `ghc -c Foo.hs -this-unit-id $uid -package-db $db -i$hiDirPlaceholders -ohi $hi -o $o` + flavor flags.
+4. For each module, in topo order, constructs and registers two **JSON derivations** with `nix derivation add`:
+   - the floating-CA object derivation consumes the module source, sibling canonical `hi` outputs, `dbIface` (or `dbFull` iff TH), and the native toolchain; it emits the real object plus raw `.hi`;
+   - the floating-CA interface derivation consumes that raw `.hi` and the pinned GHC-Wasm canonicalizer; it emits the canonical `hi` output used by ordinary downstream imports;
+   - `.hs-boot` inputs use their normal boot-interface compile path, and leaf modules may omit an otherwise-unused canonical interface derivation.
 5. Emits a link/assemble drv: inputs = all module `o` outputs + `dbFull`; produces the unit's `iface` and `out` outputs (hi tree, `.a`/`.so` or exe, conf) exactly matching `mkUnit`'s output contract, so C3 consumers can't tell the difference.
 6. Writes the assemble drv's byte content to `$out`. Because `$out` is text-hashed and `nix derivation add` stored the identical text, both converge on the same store path — the planner's output *is* the root `.drv`.
 
@@ -260,7 +259,7 @@ The scheduler then follows the chain: build planner → read root drv → build 
 - export/type change ⇒ `hi` changes ⇒ true dependents recompile. Correct by construction.
 - dep package body-only change ⇒ `dbIface` unchanged ⇒ zero module rebuilds here; only final link.
 
-**Scoping.** TH modules use `dbFull` (they must load object code) and therefore rebuild when any dep's `out` changes — conservative and correct. `hs-boot` cycles: planner supports them (compile `-boot` first) but if parsing gets hairy, `strata-lock` may demote such units to `granularity = unit` with a warning; correctness beats granularity.
+**Scoping.** TH modules use `dbFull` (they must load object code) and therefore rebuild when any dep's `out` changes — conservative and correct. `hs-boot` cycles: planner supports them (compile `-boot` first) but if parsing gets hairy, `repent` may demote such units to `granularity = unit` with a warning; correctness beats granularity.
 
 ### C5 — dev shell (shellFor parity + HLS)
 
@@ -268,14 +267,14 @@ The scheduler then follows the chain: build planner → read root drv → build 
 
 **Mechanism.**
 - Shell includes `dbFull(shellRoots)` — one composed package DB covering every external dep of the selected local packages (haskell.nix `shellFor` equivalent, but it's a symlink forest over already-CA-built units, so entering the shell after a dep bump downloads deltas from Cachix rather than rebuilding the world).
-- Generate `cabal.project.local.strata` pinning `with-compiler` and wiring the DB. Primary mechanism: the `package-dbs:` project field pointing at `[global, dbFull]`; **verify against the pinned cabal release in M2** — if unsupported there, fallback is a GHC package-environment file plus a thin `cabal` wrapper injecting the DB (implementer task, escalate with findings, do not silently pick a third mechanism).
+- Generate `cabal.project.local.penance` pinning `with-compiler` and wiring the DB. Primary mechanism: the `package-dbs:` project field pointing at `[global, dbFull]`; **verify against the pinned cabal release in M2** — if unsupported there, fallback is a GHC package-environment file plus a thin `cabal` wrapper injecting the DB (implementer task, escalate with findings, do not silently pick a third mechanism).
 - HLS: works unmodified via cabal + `cabal multi-repl` over local packages.
-- **Backpack projection.** HLS/`multi-repl`/GHC multiple-home-units do not load indefinite units. `strata projection` (subcommand of the lock tool) emits `dist-strata/projection/` where each indefinite local unit is textually specialized using `defaultInstantiations` from `strata.toml` (signatures replaced by re-exports of the default impl), plus a generated `cabal.project.projection`. Devs open *that* project in HLS when editing indefinite code; CI's indefinite-typecheck derivations (C3) keep them honest against the real signatures. Document this limitation prominently; it is an ecosystem gap, not a strata gap.
+- **Backpack projection.** HLS/`multi-repl`/GHC multiple-home-units do not load indefinite units. `penance projection` (subcommand of the lock tool) emits `dist-penance/projection/` where each indefinite local unit is textually specialized using `defaultInstantiations` from `penance.toml` (signatures replaced by re-exports of the default impl), plus a generated `cabal.project.projection`. Devs open *that* project in HLS when editing indefinite code; CI's indefinite-typecheck derivations (C3) keep them honest against the real signatures. Document this limitation prominently; it is an ecosystem gap, not a Penance gap.
 - VHDL never enters the shell closure: shell `src` is the fileset union of local Haskell package roots only.
 
 ### C6 — toolchains, cross, CUDA (delta view; full analysis in v1 report)
 
-- `strata.toml` targets carry `{ghc, llvm, cudaArch}` tuples; `strata-lock` solves per target; eval lowers per target. accelerate-llvm-ptx pins the LLVM major via `llvm-hs` — record it in the tuple and let CI assert `ghc ↔ llvm` compatibility at lock time, not at 40 minutes into a build.
+- `penance.toml` targets carry `{ghc, llvm, cudaArch}` tuples; `repent` solves per target; eval lowers per target. accelerate-llvm-ptx pins the LLVM major via `llvm-hs` — record it in the tuple and let CI assert `ghc ↔ llvm` compatibility at lock time, not at 40 minutes into a build.
 - **Primary path for Jetson (aarch64-linux): native builds, not GHC cross.** The Mac Studios are aarch64; run the standard `darwin.linux-builder` VM (native aarch64-linux, Virtualization.framework) as the builder for `aarch64-linux` derivations, with the jetpack-nixos overlay supplying L4T/CUDA userspace. This sidesteps GHC cross + TH entirely for your device target. GPU is not needed at build time (accelerate-llvm-ptx JITs via libNVVM on-device at runtime; build needs headers/libs only).
 - Keep an x86_64-linux → aarch64-linux GHC cross lane (iserv/qemu for TH) as CI-parity fallback; gate it as allowed-to-fail initially.
 - Backpack × cross: instantiation graphs are per-target in the lock (flags/conditionals differ); nothing special beyond that. Remember the TH-from-indefinite restriction applies on all targets.
@@ -305,7 +304,7 @@ msc diff  A/ B/          # per-host path/size delta report
 ```
 Persist the bundle dir between releases (or hydrate with `--seed s3://…`): regeneration cost is proportional to *changed* paths. A hermetic pure-derivation variant (closureInfo + in-sandbox NAR packing) is specified in Appendix C for release provenance, but the imperative path is the daily driver.
 
-**Consumer (on device, baked into the image by the strata NixOS module):**
+**Consumer (on device, baked into the image by the penance NixOS module):**
 ```
 msc install /media/msc [--host $(hostname)] [--test|--switch|--boot]
   → nix copy --from file:///media/msc --to daemon <toplevel-for-host>   # only missing paths
@@ -331,21 +330,21 @@ warp deploy <host> [--test]      # --test is default; --switch to persist
 warp swap <host> <service> [--exe .#pkg:exe:name]
   1. nix build the exe (module-granular)                   # usually: 1 module + link
   2. nix copy --to ssh-ng://<host> <exeClosure>
-  3. ssh <host> strata-overlay activate <service> <exePath> && systemctl restart <service>
+  3. ssh <host> penance-overlay activate <service> <exePath> && systemctl restart <service>
 warp reconcile <host>    # clear overlays, full switch-to-configuration to current system
 warp status <host>       # taint state, active overlays, generation info
 ```
-`devOverlay` NixOS module (`strata.devOverlay.enable`, dev images only — assert `!isProduction`):
-- For each managed service, installs a systemd drop-in replacing `ExecStart` with a shim: `exec $(readlink -f /run/strata-overlay/bin/<svc> 2>/dev/null || readlink /etc/strata/default/<svc>) "$@"`, where `/etc/strata/default/<svc>` points at the store default for the current generation.
-- `strata-overlay` CLI (root-only, SSH `ForceCommand`-able): `activate <svc> <storePath>` (validates the path exists locally — warp copied it first — then atomically swaps the `/run` symlink), `clear [svc]`, `status --json`.
-- `/run` is tmpfs ⇒ overlays self-heal on reboot. A taint marker (`/run/strata-overlay/tainted`, surfaced in motd + a Prometheus textfile metric) makes "this device is running non-declared code" impossible to miss; `switch-to-configuration` via Tier 0 or `msc install` clears overlays by activation hook.
+`devOverlay` NixOS module (`penance.devOverlay.enable`, dev images only — assert `!isProduction`):
+- For each managed service, installs a systemd drop-in replacing `ExecStart` with a shim: `exec $(readlink -f /run/penance-overlay/bin/<svc> 2>/dev/null || readlink /etc/penance/default/<svc>) "$@"`, where `/etc/penance/default/<svc>` points at the store default for the current generation.
+- `penance-overlay` CLI (root-only, SSH `ForceCommand`-able): `activate <svc> <storePath>` (validates the path exists locally — warp copied it first — then atomically swaps the `/run` symlink), `clear [svc]`, `status --json`.
+- `/run` is tmpfs ⇒ overlays self-heal on reboot. A taint marker (`/run/penance-overlay/tainted`, surfaced in motd + a Prometheus textfile metric) makes "this device is running non-declared code" impossible to miss; `switch-to-configuration` via Tier 0 or `msc install` clears overlays by activation hook.
 - Non-service payloads (data files, plugins): `activate --bind <svc-or-tag> <storePath> <targetStorePath>` uses a bind mount over the target path; same tmpfs lifetime, listed in `status`. Use sparingly; symlink swap is the sanctioned path.
 
 Tier choice heuristic in `warp`: if the toplevel diff touches only managed services' exes ⇒ offer Tier 1; anything touching config/units/etc ⇒ Tier 0.
 
 ### C9 — CI & caching integration
 
-- **Gates:** `strata lock --check`; `nix flake check` with IFD disallowed; eval-time budget assertion; kill-switch matrix (weekly): `{granularity=unit}`, `{lowering=nix}`, `{addressing=input}` all must stay green.
+- **Gates:** `repent --check`; `nix flake check` with IFD disallowed; eval-time budget assertion; kill-switch matrix (weekly): `{granularity=unit}`, `{lowering=nix}`, `{addressing=input}` all must stay green.
 - **Builders:** Linux x86_64 runners + Mac Studios hosting `darwin.linux-builder` aarch64-linux VMs. All builders: pinned Determinate Nix, Appendix A features, `recursive-nix` in `system-features`, shared trusted signing keys.
 - **Cachix + CA:** pushing/substituting CA paths requires realisation metadata to flow with signatures. **M3 includes an explicit verification task** of Cachix realisation support with your account tier. Fallback that preserves all dev-loop benefits: designate one resolver builder per target that realises the CA graph and pushes *resolved* closures keyed by input-addressed anchor derivations (a 20-line wrapper emitted by C2 when `addressing=ca` and `cacheAnchor=true`); other machines substitute anchors like any normal path.
 - **Large-repo hygiene:** lazy trees on; all Haskell `src`s are filesets (invariant 10); CI checkout uses sparse/partial clone so Mac VMs never materialize VHDL blobs.
@@ -355,11 +354,11 @@ Tier choice heuristic in `warp`: if the toplevel diff touches only managed servi
 
 ## 5. Data schemas
 
-### 5.1 `strata.lock` (v2, canonical JSON, committed)
+### 5.1 `penance.lock` (v2, canonical JSON, committed)
 
 ```jsonc
 {
-  "schema": "strata/2",
+  "schema": "penance/lock/2",
   "lockHash": "sha256-…",                  // over everything below, canonical form
   "solver": { "cabal": "3.14.1.0", "indexState": "2026-06-20T00:00:00Z" },
   "toolchains": {
@@ -423,7 +422,7 @@ Rules: unit maps sorted by uid; dep lists sorted; no nulls omitted-vs-present am
 }
 ```
 
-### 5.3 Module derivation JSON (emitted by `strata-plan`, consumed by `nix derivation add`)
+### 5.3 Module derivation JSON (emitted by `penance-plan`, consumed by `nix derivation add`)
 
 Template — exact field spelling **must be validated in M0 (P1)** against the pinned Nix's `nix derivation show`/`add` round-trip and then frozen in a golden test:
 
@@ -446,17 +445,17 @@ Template — exact field spelling **must be validated in M0 (P1)** against the p
 ### 5.4 `devOverlay` on-device state
 
 ```
-/etc/strata/default/<svc>          -> store path (per-generation default, managed by module)
-/run/strata-overlay/bin/<svc>      -> store path (dev override; absent = no override)
-/run/strata-overlay/tainted        # newline list: "<svc> <path> <iso8601>"
-strata-overlay {activate|clear|status --json}
+/etc/penance/default/<svc>          -> store path (per-generation default, managed by module)
+/run/penance-overlay/bin/<svc>      -> store path (dev override; absent = no override)
+/run/penance-overlay/tainted        # newline list: "<svc> <path> <iso8601>"
+penance-overlay {activate|clear|status --json}
 ```
 
 ---
 
 ## 6. Test plan
 
-### 6.1 M0 spike probes (must all pass before any strata code is written)
+### 6.1 M0 spike probes (must all pass before any Penance code is written)
 
 Run on a pinned Determinate Nix with Appendix A config. Each probe is a tiny committed fixture under `tests/probes/`.
 
@@ -474,7 +473,7 @@ Any P-failure: capture `nix --version`, full logs, minimal repro; check the dyna
 
 ### 6.2 Per-component tests
 
-**C1 strata-lock** — golden lock for a fixture workspace (byte-stable across machines/OSes, T-C1-2); solver-freshness (`--check` fails on edited `.cabal`); Backpack fixture: indefinite lib + 2 impls + 2 instantiations ⇒ lock contains 1 indefinite + 2 instantiation units with correct `instantiatedWith` (T-C1-3, cross-checked against `ghc-pkg field` unit-ids from a real cabal build); custom-Setup demotion to `granularity=unit`; per-target flag divergence fixture.
+**C1 repent** — golden lock for a fixture workspace (byte-stable across machines/OSes, T-C1-2); solver-freshness (`--check` fails on edited `.cabal`); Backpack fixture: indefinite lib + 2 impls + 2 instantiations ⇒ lock contains 1 indefinite + 2 instantiation units with correct `instantiatedWith` (T-C1-3, cross-checked against `ghc-pkg field` unit-ids from a real cabal build); custom-Setup demotion to `granularity=unit`; per-target flag divergence fixture.
 
 **C2 eval** — wasm and Nix lowerers produce `deepSeq`-equal attrsets on all fixtures (T-C2-1); eval wall-time budget test: synthetic 600-unit lock evals `nix flake show` under 3 s warm / 20 s cold on the reference dev box (fail = perf regression); `allow-import-from-derivation=false` full-suite run.
 
@@ -486,9 +485,9 @@ Any P-failure: capture `nix --version`, full logs, minimal repro; check the dyna
 | new exported function | recompile importing modules only |
 | type change in used export | recompile dependents (compile error surfaces = correct) |
 
-Plus Backpack matrix (T-C3-5): edit impl A body ⇒ neither instantiation recompiles; edit impl A exported type ⇒ only A-instantiation rebuilds; edit `.hsig` ⇒ indefinite + both instantiations rebuild. Plus `.hi` determinism soak: 20 rebuilds of a TH-free unit at dev flags ⇒ identical `iface` output hash.
+Plus Backpack matrix (T-C3-5): edit impl A body ⇒ neither instantiation recompiles; edit impl A exported type ⇒ only A-instantiation rebuilds; edit `.hsig` ⇒ indefinite + both instantiations rebuild. Plus canonical `.hi` determinism soak: 20 rebuilds of a TH-free unit at dev flags ⇒ identical `iface` output hash, while an exported type edit changes it.
 
-**C4 strata-plan** — determinism (T-C4-1 = P7 on real GHC); `ghc -M` DAG vs known fixture graph; TH classification fixture (TH module gets `dbFull`, others `dbIface`); hs-boot fixture (either correct order or clean demotion warning); **module cutoff end-to-end**: 30-module app, body edit ⇒ exactly 1 module drv + assemble rebuild (assert from build logs); planner overhead budget: < 2 s per unit on reference box.
+**C4 penance-plan** — determinism (T-C4-1 = P7 on real GHC); `ghc -M` DAG vs known fixture graph; TH classification fixture (TH module gets `dbFull`, others `dbIface`); hs-boot fixture (either correct order or clean demotion warning); **module cutoff end-to-end**: 30-module app, body edit ⇒ exactly 1 module drv + assemble rebuild (assert from build logs); planner overhead budget: < 2 s per unit on reference box.
 
 **C5 shell** — `nix develop` then `cabal build all` compiles zero external packages (assert via cabal log); HLS loads multi-package fixture; projection fixture: HLS loads specialized indefinite unit; `package-dbs:` mechanism verification recorded as an ADR.
 
@@ -522,7 +521,7 @@ Conventions: every milestone ends with its tests green in CI + a short ADR (`doc
 **M0 — Environment + primitives spike (wk 1).**
 Pin Determinate Nix (Appendix A) on your box, one Linux runner, one Studio VM. Implement the P1–P7 probes exactly as §6.1. Deliverables: `tests/probes/*`, CI job `probes`, ADR-000 with observed Nix version/behaviors. **Gate: all probes green on all three machines.**
 
-**M1 — strata-lock MVP, no Backpack (wk 2–3).**
+**M1 — repent MVP, no Backpack (wk 2–3).**
 Haskell project vendoring cabal-install; implement solve→elaborate→emit for `ordinary` units; `--check`; golden + determinism tests (T-C1-*). Fixture workspace: 3 local packages + 15 Hackage deps. Skip: instantiations, custom Setup (demote + TODO).
 
 **M2 — static eval + unit builder + shell (wk 3–5). Kill-switch baseline.**
@@ -532,16 +531,16 @@ Haskell project vendoring cabal-install; implement solve→elaborate→emit for 
 `.hi` determinism soak; remote-builder CA trust config; Cachix realisation verification task → either "supported, tested" or anchor-fallback implemented (C9). Weekly kill-switch matrix job.
 
 **M4 — dyndrv module granularity (wk 6–9).**
-`strata-plan` per §C4 in Rust or Haskell (static musl binary, becomes a pinned store input): `ghc -M` parse → TH classify → `add-path` sources → emit module/assemble drvs (JSON, golden-frozen per P1) → text-hash convergence. `mkPlanner` in C2; `granularity=module` for fixture app; T-C4-* + end-to-end cutoff; wire benchmark (3)/(4). Roll out to real repo behind per-unit opt-in in `strata.toml`, expand as soak passes. **Gate: 30-module fixture rebuilds exactly 1 module + assemble on body edit; kill switch back to `unit` stays green.**
+`penance-plan` in Haskell (static binary, becomes a pinned store input): `ghc -M` parse → TH classify → `add-path` sources → emit module/assemble drvs (JSON, golden-frozen per P1) → text-hash convergence. `mkPlanner` in C2; `granularity=module` for fixture app; T-C4-* + end-to-end cutoff; wire benchmark (3)/(4). Roll out to real repo behind per-unit opt-in in `penance.toml`, expand as soak passes. **Gate: 30-module fixture rebuilds exactly 1 module + assemble on body edit; kill switch back to `unit` stays green.**
 
 **M5 — Backpack (wk 9–11).**
-Lock: elaborate `indefinite`/`instantiation` (ElaboratedInstallPlan → OpenUnitId/ModuleSubst; `hashModuleSubst` ids); T-C1-3. Build: `mkUnit` gains `--cid`/`--instantiate-with` + indefinite typecheck-only mode + iface/out split for both; T-C3-5 matrix. Shell: `strata projection` generator + HLS fixture. Docs: TH-from-indefinite limitation, projection workflow.
+Lock: elaborate `indefinite`/`instantiation` (ElaboratedInstallPlan → OpenUnitId/ModuleSubst; `hashModuleSubst` ids); T-C1-3. Build: `mkUnit` gains `--cid`/`--instantiate-with` + indefinite typecheck-only mode + iface/out split for both; T-C3-5 matrix. Shell: `penance projection` generator + HLS fixture. Docs: TH-from-indefinite limitation, projection workflow.
 
 **M6 — cross + CUDA lanes (wk 11–13).**
 linux-builder VM as `aarch64-linux` builder (features per Appendix A); jetpack-nixos overlay wiring; per-target lowering; accelerate-llvm-ptx fixture; lock-time ghc↔llvm assertion; nightly HIL smoke. x86 cross lane scaffolded, allowed-to-fail.
 
 **M7 — msc + warp + devOverlay (wk 13–15).**
-`msc bundle/verify/diff/install` per §C7 + VM device-sim test; `devOverlay` module + `strata-overlay` CLI + assertions; `warp deploy/swap/reconcile/status`; VM tests then bench-Jetson latency numbers into benchmarks (5)/(6).
+`msc bundle/verify/diff/install` per §C7 + VM device-sim test; `devOverlay` module + `penance-overlay` CLI + assertions; `warp deploy/swap/reconcile/status`; VM tests then bench-Jetson latency numbers into benchmarks (5)/(6).
 
 **M8 — migration + hardening (wk 15–17).**
 Snapshot→`snapshot.yaml` converter from your existing haskell.nix stackage; overlay shim so `nixosConfigurations` swap sources without edits; run both systems in CI comparing built exe closures per host; flip default; keep haskell.nix lane for two release trains; delete. Runbooks: "Nix upgrade procedure (probes first)", "dyndrv incident: flip granularity kill switch", "device taint audit".
@@ -563,9 +562,9 @@ Sequencing rationale: M2 is a complete, shippable improvement; M4/M5 are indepen
 | accelerate/llvm-hs pins vs GHC bump | med | target lane blocked | tuple asserted at lock time; upgrade spikes in a branch lane |
 | Mac VM builder throughput/uid-range quirks | med | aarch64 queue | benchmark early (M6); scale VM count; x86 cross lane as backup |
 | Device drift via overlays | med | debugging confusion | taint surfacing + `warp reconcile`; overlays tmpfs-only; prod images assert-off |
-| cabal-install internal API churn in strata-lock | high over years | lock tool maintenance | vendor + pin; upgrade only with golden-lock diff review |
+| cabal-install internal API churn in repent | high over years | lock tool maintenance | vendor + pin; upgrade only with golden-lock diff review |
 
-Kill switches (flake-level `strata.settings`): `granularity`, `lowering`, `addressing`, `cacheAnchor` — each independently CI-exercised weekly (C9).
+Kill switches (flake-level `penance.settings`): `granularity`, `lowering`, `addressing`, `cacheAnchor` — each independently CI-exercised weekly (C9).
 
 ---
 
@@ -607,7 +606,7 @@ Verify option spellings against the pinned manual during M0; record in ADR-000.
 dev:     -O0 -fomit-interface-pragmas -fignore-interface-pragmas -fhide-source-paths -fdiagnostics-color=never
 release: -O2 -fhide-source-paths  (granularity forced to "unit"; full inlining across modules)
 ```
-Rationale: dev `.hi` ≈ ABI only ⇒ maximal cutoff; release trades cutoff for optimization and is CI-only.
+Rationale: dev interface payloads omit implementation pragmas, and the shared GHC-Wasm pass replaces the source hash while retaining ABI and dependency-interface propagation. Release retains optimizer payloads, trades cutoff for optimization, and is CI-only.
 
 ## Appendix C — Hermetic MSC derivation (optional release path)
 

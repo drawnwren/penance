@@ -27,16 +27,16 @@ textual coincidence, with zero consistency checking.
 
 | Item | Grade | One-line verdict |
 |---|---|---|
-| A1 lock externals | ⚠️ Partial | Mechanics real and tested; the "solver" is a hardcoded 7-entry registry; `--index-state` is recorded but ignored |
+| A1 lock externals | ✅ Genuine | `repent` converts a pinned Cabal `plan.json`; index state, ranges, transitive external dependencies, and sdist hashes come from Cabal |
 | A2 unit builder | ✅ Genuine | Lock-driven builds, no-IFD eval, corrupted-lock negative — all re-verified |
 | A3 matrices → lock path | ⚠️ Mostly | M2 rows and flags genuinely lock-driven; HN-hackage/stackage lanes quietly exempted themselves |
 | A4 dev shell | ⚠️ Half | `devShells.default` is lock-derived; the proof still proves the OLD hand-list shell |
 | A5 acceptance | ✅/⚠️ | Docs updated honestly; bench green re-confirmed (after restoring a contaminated working-tree file) |
 | B1–B3 probes | ✅ Genuine | Chain, no-op, CLI `^out^out`, liveness — all re-verified live |
 | B4 determinism | ⚠️ Deviated | Salted same-store runs instead of clean stores; criteria text edited; summary.json claims a command never run |
-| B5 CA iface/out split | ⚠️ Fragile | Works for current fixtures; two divergent stubbers, a demonstrated interface-dropping bug, no ABI check |
+| B5 CA iface/out split | ✅ Genuine | Real GHC interfaces are canonicalized by GHC-Wasm; adversarial body/API/export and native-consumer proofs cover GHC 9.10.2 and 9.10.3 |
 | B6 hi soak | ✅ | Real 5× rebuild comparison with self-check |
-| B7 strata-plan | ✅ Genuine | Real `ghc -M` planner, emission + text-hash convergence, output equivalence |
+| B7 penance-plan | ✅ Genuine | Real `ghc -M` planner, emission + text-hash convergence, output equivalence |
 | B8 30-module cutoff | ✅ Genuine | Exact-set bounds enforced; re-run live: body=3, noop=0 |
 | B9 hs-boot/TH | ✅ | drv-level dbFull/dbIface assertions + behavioral rebuild split (audit-verified) |
 | B10 kill switch | ✅ | unit vs module outputs byte-compared in `penanceProjectVariants`; C9 row correctly still failing |
@@ -57,7 +57,7 @@ textual coincidence, with zero consistency checking.
 - The rebuild harness's exact-name assertion fails in BOTH directions (extra
   and missing rebuilds) — demonstrated during evaluation when a missing
   `assemble` marker failed the suite.
-- docs/ARCHITECTURE.md discloses the solver shortcut plainly.
+- The lock encoder remains byte-compatible while external resolution now comes from Cabal's elaborated plan.
 
 ---
 
@@ -111,71 +111,44 @@ does not qualify.
 # files for the exe closure, and a scratch `nix copy --from` succeeds.
 ```
 
-## F3 — B5 stub-interface mechanism has no consistency check ⚠️ HIGH
+## F3 — B5 interface consistency ✅ RESOLVED
 
-The `iface` output is compiled from **textually body-erased stub sources**
-(Perl in nix/lib.nix ~481; a second, divergent Haskell implementation in
-planner-bin/src/Penance/Dyndrv.hs `abiStubSource` ~427). Verified facts:
+The audit correctly found that the former source-rewriting implementations
+could diverge from the real module and could silently lose a primed export.
+Both implementations have now been deleted.
 
-- The motivation is legitimate: GHC 9.10 `.hi` embeds `src_hash`, so
-  byte-identical `.hi` under body edits is impossible (empirically confirmed;
-  ABI hash IS stable).
-- The Perl stubber has a demonstrated bug: a primed sibling (`foo :: Int;
-  foo = 1; foo' :: String; foo' = "x"`) gets `foo'` **silently deleted from
-  the interface** while remaining in the linked archive.
-- Unsigned exports silently keep their real bodies (sound, but cutoff is
-  silently lost); declaration-level TH splices fail loudly; TH that catches
-  errors (`recover`/`runIO`) is a narrow genuine unsoundness vector.
-- There is NO stub-vs-real reconciliation anywhere, even though the real
-  compile's `.hi` files are produced and then discarded.
-- Every committed fixture is written in the one style the stubber handles
-  (single-line, column-0, single-name signatures).
+`planner-bin/src/IfaceCanonMain.hs` is compiled with GHC-Wasm and linked
+against the GHC libraries. It deserializes the real native `ModIface`, keeps
+the producer header and semantic payload, replaces the source hash with GHC's
+ABI hash, and derives the interface hash from that ABI plus sorted direct
+dependency-interface paths. Planner-staged object usage records are omitted
+only where the Nix graph already owns the Template Haskell execution edge. The
+static and dynamic builders invoke the same executable.
 
-**Remediation R3 (the cheap, load-bearing one):** in both builders, before
-discarding the real `.hi`, assert per module that
-`ghc --show-iface` **ABI hash and export list** of the stub `.hi` equal the
-real `.hi`'s. Fail the build on mismatch (or, in the planner, demote the
-unit to `granularity = unit` with a logged warning — correctness beats
-granularity per spec §C4).
+`penanceIfaceCanonicalizerProof` now establishes the missing consistency
+contract for native GHC 9.10.2 and 9.10.3 interfaces:
 
-```sh
-# pass criteria
-# 1. current fixtures still build (ABI hashes match).
-# 2. negative fixtures added under tests/fixtures/stub-abi/ and they FAIL
-#    (or demote) rather than pass silently:
-#    - module with foo and foo' both signed        (Perl deletion bug)
-#    - module with an unsigned exported binding    (documents cutoff loss)
-#    - module with a declaration-level TH splice
-# 3. unify or differentially test the two stubbers: run both on every
-#    fixture source and diff their outputs in a flake check.
-```
+- repeated and body-edited canonical interfaces are byte-identical;
+- an exported type edit changes the canonical interface;
+- `foo`, `foo'`, and an exported binding without a signature remain exported;
+- native GHC compiles a consumer against the rewritten interface;
+- dependency-interface changes propagate deterministically, independent of
+  argument ordering;
+- a mismatched producer interface version is rejected.
 
-## F4 — A1's "solver" is a hardcoded registry ⚠️ HIGH (honesty: MEDIUM)
+## F4 — A1 external solver ✅ RESOLVED
 
-`resolveExternalUnits` (planner-bin/src/LockMain.hs ~285) resolves from
-`hackageRegistry` (exactly one package: StateVar, hand-pinned version, URL,
-hash), `hackageDependencies` (hardcoded case for StateVar), and
-`bootRegistry` (six packages with per-compiler versions). `--index-state`
-is accepted and written into the lock but never consulted. Version ranges in
-`.cabal` files are not checked against the resolved versions. Any dependency
-outside the registry dies. docs/ARCHITECTURE.md admits this; the A1
-checkbox does not.
+`repent` now runs pinned `cabal build --dry-run --offline`, decodes the
+resulting `plan.json`, follows configured-unit dependency edges, and converts
+Cabal's exact versions and `pkg-src-sha256` values into canonical lock entries.
+The flake wrapper supplies a read-only Cabal directory populated from the
+pinned haskell.nix Hackage index. `--plan-json` also accepts a precomputed plan.
+The existing range-change negative now fails in Cabal's solver.
 
-**Remediation R4:** either implement real resolution (the original item
-offered two mechanisms: convert the pinned cabal's `plan.json` at lock time,
-or use cabal-install's solver as a library), or — if deferring — (a) rename
-the mechanism in the lock schema docs and CHECKPOINT to "pinned registry",
-(b) make `penance-lock` FAIL when a resolved version violates the declaring
-component's version range, and (c) stop emitting `indexState` into locks it
-does not influence (or validate it against the registry's provenance).
-Deferral must be recorded as a failing gap row (suggested id
-`M1-external-solver`), jq list updated in lockstep.
-
-```sh
-# pass criteria (deferral path)
-# range check negative: edit lock-external.cabal to `StateVar >=1.3` in a
-# scratch copy -> penance-lock exits nonzero (today it happily locks 1.2.2)
-```
+The remaining lock limitation is structural rather than solver correctness:
+schema v1 coalesces configured components into package-level external entries.
+The target unit-elaborated schema must retain Cabal unit IDs, flags, and direct
+unit edges instead of coalescing them.
 
 ## F5 — determinism probe: criteria edited, manifest inaccurate ⚠️ MEDIUM
 
@@ -210,7 +183,7 @@ units; delete `penanceBenchShellPackageNames` and `penanceBenchShellGhc`.
 ```sh
 # pass criteria: the proof's package-db.txt lists exactly the lock's
 # externals; adding a dep to the fixture cabal without regenerating the lock
-# fails penance-lock --check (freshness already covers the negative).
+# fails repent --check (freshness already covers the negative).
 ```
 
 ## F7 — the lock-driven external build is never exercised by the suite ⚠️ MEDIUM

@@ -9,6 +9,12 @@ import qualified Data.Set as Set
 import Penance.GhcMakefile (ModuleDep (..), moduleGraphFromMakefile)
 import Penance.Json (Json (..), array, bool, object, renderJson, string)
 import qualified Penance.Json as Json
+import Penance.Types
+  ( PackageDbKind (..)
+  , PenanceSchema (..)
+  , renderPackageDbKind
+  , renderPenanceSchema
+  )
 import System.Exit (die)
 
 data LockComponent = LockComponent
@@ -116,7 +122,7 @@ hasAnnPragma contents =
 planJson :: String -> [ModulePlan] -> Json
 planJson componentName plans =
   object
-    [ ("schema", string "penance/module-plan/1")
+    [ ("schema", string (renderPenanceSchema ModulePlanSchemaV1))
     , ("component", string componentName)
     , ("modules", array (map moduleJson plans))
     ]
@@ -129,7 +135,7 @@ moduleJson plan =
     , ("hiDeps", array (map string (planHiDeps plan)))
     , ("extensions", array (map string (planExtensions plan)))
     , ("ann", bool (planAnnPragma plan))
-    , ("db", string (if needsDbFull plan then "dbFull" else "dbIface"))
+    , ("db", string (renderPackageDbKind (if needsDbFull plan then FullPackageDb else InterfacePackageDb)))
     ]
 
 needsDbFull :: ModulePlan -> Bool

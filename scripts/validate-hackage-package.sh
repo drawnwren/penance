@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: validate-hackage-package.sh [--index-state TIMESTAMP|HEAD] [--compiler-nix-name NAME] PACKAGE_OR_PACKAGE_VERSION
+usage: validate-hackage-package.sh [--index-state TIMESTAMP|HEAD] --compiler ID --compiler-nix-name NAME PACKAGE_OR_PACKAGE_VERSION
 
 Examples:
   scripts/validate-hackage-package.sh StateVar-1.2.2
@@ -16,8 +16,8 @@ EOF
 }
 
 index_state="${PENANCE_INDEX_STATE:-2026-02-01T00:00:00Z}"
-compiler_nix_name="${PENANCE_COMPILER_NIX_NAME:-ghc910}"
-penance_compiler="${PENANCE_COMPILER:-ghc-9.10.3}"
+compiler_nix_name="${PENANCE_COMPILER_NIX_NAME:-}"
+penance_compiler="${PENANCE_COMPILER:-}"
 keep_work="${PENANCE_KEEP_HACKAGE_WORK:-1}"
 package_spec=""
 
@@ -29,6 +29,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --compiler-nix-name)
       compiler_nix_name="${2:?--compiler-nix-name requires a value}"
+      shift 2
+      ;;
+    --compiler)
+      penance_compiler="${2:?--compiler requires a value}"
       shift 2
       ;;
     --cleanup)
@@ -57,6 +61,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$package_spec" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ -z "$penance_compiler" || -z "$compiler_nix_name" ]]; then
+  echo "--compiler and --compiler-nix-name are required" >&2
   usage
   exit 2
 fi

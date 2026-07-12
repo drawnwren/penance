@@ -7,17 +7,21 @@ where
 import Data.List (intercalate)
 import qualified Penance.Json as Json
 import Penance.Json (array, object, string)
-import Penance.Plan
+import Penance.Skeleton
   ( BackpackSkeleton (..)
   , ExpectedInstantiation (..)
   , IndefiniteUnit (..)
   , ProjectSkeleton (..)
-  , backpack
-  , drvFileFor
-  , skeletonPath
-  , writeJsonFile
   )
-import System.Directory (copyFile, createDirectoryIfMissing)
+import Penance.Plan (drvFileFor, writeJsonFile)
+import Penance.Types
+  ( PlanArtifactKind (..)
+  , PlanStatus (..)
+  , renderGranularity
+  , renderPlanArtifactKind
+  , renderPlanStatus
+  )
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
 data BackpackEntry
@@ -44,7 +48,6 @@ emitBootstrap skeleton out = do
   let dir = out </> "signatures"
   createDirectoryIfMissing True dir
   createDirectoryIfMissing True (out </> "instantiations")
-  copyFile (skeletonPath skeleton) (dir </> "backpack-graph.bootstrap.json")
   writeJsonFile (dir </> "backpack-graph.json") (backpackGraphJson skeleton)
   mapM_ (writeBackpackPlan out) (backpackEntries skeleton)
 
@@ -75,11 +78,11 @@ backpackEntries skeleton =
 backpackGraphJson :: ProjectSkeleton -> Json.Json
 backpackGraphJson skeleton =
   object
-    [ ("kind", string "backpackGraph")
-    , ("status", string "planned")
+    [ ("kind", string (renderPlanArtifactKind BackpackGraphArtifact))
+    , ("status", string (renderPlanStatus Planned))
     , ("projectKey", string (projectKey skeleton))
     , ("planCacheKey", string (planCacheKey skeleton))
-    , ("granularity", string (granularity skeleton))
+    , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("indefiniteUnits", array (map indefiniteUnitJson (indefiniteUnits (backpack skeleton))))
     , ("expectedInstantiations", array (map instantiationJson (expectedInstantiations (backpack skeleton))))
     , ("plannedDrvs", array (map backpackEntryJson (backpackEntries skeleton)))
@@ -112,20 +115,20 @@ backpackEntryJson entry =
   case entry of
     SignatureTypecheck unit path ->
       object
-        [ ("kind", string "signatureTypecheckDrv")
+        [ ("kind", string (renderPlanArtifactKind SignatureTypecheckDrvArtifact))
         , ("unit", string (indefiniteUnit unit))
         , ("drvPlan", string path)
         ]
     SignatureInterface unit signature path ->
       object
-        [ ("kind", string "signatureDrv")
+        [ ("kind", string (renderPlanArtifactKind SignatureDrvArtifact))
         , ("unit", string (indefiniteUnit unit))
         , ("signature", string signature)
         , ("drvPlan", string path)
         ]
     InstantiationPlan instantiation path ->
       object
-        [ ("kind", string "instantiationDrv")
+        [ ("kind", string (renderPlanArtifactKind InstantiationDrvArtifact))
         , ("unit", string (instantiationUnit instantiation))
         , ("instantiationKey", string (instantiationKey instantiation))
         , ("drvPlan", string path)
@@ -137,16 +140,16 @@ writeBackpackPlan out entry =
     SignatureTypecheck unit path ->
       writePlan path
         ( object
-            [ ("kind", string "signatureTypecheckDrv")
-            , ("status", string "planned")
+            [ ("kind", string (renderPlanArtifactKind SignatureTypecheckDrvArtifact))
+            , ("status", string (renderPlanStatus Planned))
             , ("unit", string (indefiniteUnit unit))
             ]
         )
     SignatureInterface unit signature path ->
       writePlan path
         ( object
-            [ ("kind", string "signatureDrv")
-            , ("status", string "planned")
+            [ ("kind", string (renderPlanArtifactKind SignatureDrvArtifact))
+            , ("status", string (renderPlanStatus Planned))
             , ("unit", string (indefiniteUnit unit))
             , ("signature", string signature)
             ]
@@ -154,8 +157,8 @@ writeBackpackPlan out entry =
     InstantiationPlan instantiation path ->
       writePlan path
         ( object
-            [ ("kind", string "instantiationDrv")
-            , ("status", string "planned")
+            [ ("kind", string (renderPlanArtifactKind InstantiationDrvArtifact))
+            , ("status", string (renderPlanStatus Planned))
             , ("unit", string (instantiationUnit instantiation))
             , ("instantiationKey", string (instantiationKey instantiation))
             , ("holes", object (map (\(hole, provider) -> (hole, string provider)) (instantiationHoles instantiation)))

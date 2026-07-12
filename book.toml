@@ -1,0 +1,34 @@
+[book]
+title = "Penance"
+description = "Architecture and implementation guide for the Penance Haskell/Nix build system"
+authors = ["Penance contributors"]
+language = "en"
+src = "docs/book-src"
+
+[build]
+build-dir = "book"
+create-missing = false
+extra-watch-dirs = ["docs"]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+additional-css = ["docs/theme/penance.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+no-section-label = true
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
+
+[output.html.redirect]
+"/NEW_ARCHITECTURE.MD" = "NEW_ARCHITECTURE.html"

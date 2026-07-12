@@ -6,15 +6,21 @@ where
 
 import qualified Penance.Json as Json
 import Penance.Json (array, object, string)
-import Penance.Plan
+import Penance.Skeleton
   ( LocalComponent (..)
   , LocalPackage (..)
   , ProjectSkeleton (..)
-  , drvFileFor
-  , skeletonPath
-  , writeJsonFile
   )
-import System.Directory (copyFile, createDirectoryIfMissing)
+import Penance.Plan (drvFileFor, writeJsonFile)
+import Penance.Types
+  ( PlanArtifactKind (..)
+  , PlanStatus (..)
+  , renderComponentKind
+  , renderGranularity
+  , renderPlanArtifactKind
+  , renderPlanStatus
+  )
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
 data PackageEntry = PackageEntry
@@ -38,7 +44,6 @@ emitBootstrap :: ProjectSkeleton -> FilePath -> IO ()
 emitBootstrap skeleton out = do
   let dir = out </> "packages"
   createDirectoryIfMissing True dir
-  copyFile (skeletonPath skeleton) (dir </> "package-graph.bootstrap.json")
   writeJsonFile (dir </> "package-graph.json") (packageGraphJson skeleton)
   mapM_ (writePackagePlan out) (packageEntries skeleton)
 
@@ -59,11 +64,11 @@ packageEntries skeleton =
 packageGraphJson :: ProjectSkeleton -> Json.Json
 packageGraphJson skeleton =
   object
-    [ ("kind", string "packageGraph")
-    , ("status", string "planned")
+    [ ("kind", string (renderPlanArtifactKind PackageGraphArtifact))
+    , ("status", string (renderPlanStatus Planned))
     , ("projectKey", string (projectKey skeleton))
     , ("planCacheKey", string (planCacheKey skeleton))
-    , ("granularity", string (granularity skeleton))
+    , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("packages", array (map packageEntryJson (packageEntries skeleton)))
     ]
 
@@ -83,7 +88,7 @@ componentJson :: LocalComponent -> Json.Json
 componentJson component =
   object
     [ ("component", string (componentName component))
-    , ("kind", string (componentKind component))
+    , ("kind", string (renderComponentKind (componentKind component)))
     , ("providedModules", array (map string (componentProvidedModules component)))
     , ("signatures", array (map string (componentSignatures component)))
     , ("requiredSignatures", array (map string (componentRequiredSignatures component)))
@@ -98,8 +103,8 @@ writePackagePlan out entry = do
   writeJsonFile
     (out </> entryPath entry)
     ( object
-        [ ("kind", string "packagePlan")
-        , ("status", string "planned")
+        [ ("kind", string (renderPlanArtifactKind PackagePlanArtifact))
+        , ("status", string (renderPlanStatus Planned))
         , ("package", string (entryName entry))
         , ("version", string (entryVersion entry))
         , ("components", array (map componentJson (entryComponents entry)))

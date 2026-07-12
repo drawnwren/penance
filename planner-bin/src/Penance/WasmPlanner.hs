@@ -10,23 +10,49 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Penance.Blake3 (hashHex)
 import Penance.Json (Json (..))
 import qualified Penance.Json as Json
+import Penance.Skeleton
+  ( BackpackSkeleton (..)
+  , ExpectedInstantiation (..)
+  , ExpectedOutputs (..)
+  , IndefiniteUnit (..)
+  , LocalComponent (..)
+  , LocalPackage (..)
+  , ProjectSkeleton (..)
+  , encodeLocalPackage
+  , encodeProjectSkeleton
+  )
+import Penance.Types
+  ( CompilerId (..)
+  , ComponentKind (..)
+  , Granularity
+  , IndexState (..)
+  , MaterializationMode
+  , SourceKind
+  , parseComponentKind
+  , parseGranularity
+  , parseMaterializationMode
+  , parseSourceKind
+  , renderGranularity
+  , renderMaterializationMode
+  , renderSourceKind
+  )
 
 data NormalizeInput = NormalizeInput
   { inputSrcTreeDigest :: Maybe String
   , inputSourceManifest :: [SourceManifestEntry]
-  , inputCompiler :: String
-  , inputIndexState :: String
+  , inputCompiler :: CompilerId
+  , inputIndexState :: IndexState
   , inputCabalProjectText :: String
   , inputLocalPackageManifests :: [LocalPackageManifest]
   , inputFlags :: [(String, Bool)]
-  , inputMaterializationMode :: String
-  , inputGranularity :: String
+  , inputMaterializationMode :: MaterializationMode
+  , inputGranularity :: Granularity
   }
   deriving (Eq, Show)
 
 data SourceManifestEntry = SourceManifestEntry
   { sourcePath :: String
-  , sourceKind :: String
+  , sourceKind :: SourceKind
   , sourceSha256 :: String
   }
   deriving (Eq, Ord, Show)
@@ -42,9 +68,6 @@ data CabalProject = CabalProject
   , projectSourceRepos :: [[(String, String)]]
   }
   deriving (Eq, Show)
-
-data ComponentKind = Library | Executable | TestSuite | Benchmark
-  deriving (Eq, Ord, Show)
 
 data CabalComponent = CabalComponent
   { cabalComponentId :: String
@@ -65,44 +88,9 @@ data CabalPackage = CabalPackage
   }
   deriving (Eq, Show)
 
-data LocalComponent = LocalComponent
-  { localComponentId :: String
-  , localComponentKind :: String
-  , localProvidedModules :: [String]
-  , localSignatures :: [String]
-  , localRequiredSignatures :: [String]
-  , localMixins :: [String]
-  , localReexportedModules :: [String]
-  }
-  deriving (Eq, Ord, Show)
-
-data LocalPackage = LocalPackage
-  { localPackageName :: String
-  , localPackageVersion :: String
-  , localPackageComponents :: [String]
-  , localComponentDetails :: [LocalComponent]
-  , localPackageSignatures :: [String]
-  , localPackageRequiredSignatures :: [String]
-  , localPackageProvidedModules :: [String]
-  }
-  deriving (Eq, Ord, Show)
-
-data IndefiniteUnit = IndefiniteUnit
-  { indefiniteUnit :: String
-  , indefinitePackage :: String
-  , indefiniteComponent :: String
-  , indefiniteSignatures :: [String]
-  , indefiniteRequiredSignatures :: [String]
-  , indefiniteMixins :: [String]
-  , indefiniteReexportedModules :: [String]
-  }
-  deriving (Eq, Ord, Show)
-
-data ExpectedInstantiation = ExpectedInstantiation
-  { instantiationUnit :: String
-  , instantiationHoles :: [(String, String)]
-  }
-  deriving (Eq, Ord, Show)
+-- The @LocalComponent@, @LocalPackage@, @IndefiniteUnit@ and
+-- @ExpectedInstantiation@ types now live in "Penance.Skeleton" — the single
+-- source of truth shared with the native decoder.
 
 data LogicalLine = LogicalLine
   { logicalNumber :: Int
@@ -111,10 +99,9 @@ data LogicalLine = LogicalLine
   }
   deriving (Eq, Show)
 
-data StanzaHeader = StanzaHeader
-  { stanzaKind :: ComponentKind
-  , stanzaName :: Maybe String
-  }
+data StanzaHeader
+  = MainLibraryHeader
+  | NamedComponentHeader ComponentKind String
   deriving (Eq, Show)
 
 normalizeProject :: String -> Either String String
@@ -126,18 +113,6 @@ normalizeProjectWorker input = do
   require
     ("blake3:" `isPrefixOf` sourceDigest)
     ("srcTreeDigest must be a blake3 digest, got `" ++ sourceDigest ++ "`")
-  require
-    (inputMaterializationMode input == "dynamic")
-    ( "unsupported materializationMode `"
-        ++ inputMaterializationMode input
-        ++ "`; expected `dynamic`"
-    )
-  require
-    (inputGranularity input `elem` ["component", "module"])
-    ( "unsupported granularity `"
-        ++ inputGranularity input
-        ++ "`; expected `component` or `module`"
-    )
   cabalProject <- parseCabalProject (inputCabalProjectText input)
   cabalPackages <- mapM parseManifest manifests
   let localPackages = sortBy comparePackage (map localPackageFromCabal cabalPackages)
@@ -158,27 +133,27 @@ normalizeProjectWorker input = do
           )
   pure
     ( Json.renderJson
-        ( Json.object
-            [ ("projectKey", Json.string projectKey)
-            , ("localPackages", Json.array (map localPackageJson localPackages))
-            , ("sourceRepos", Json.array (map stringMapJson (projectSourceRepos cabalProject)))
-            , ("planCacheKey", Json.string planCacheKey)
-            , ("plannerDrvInputs", Json.array [])
-            , ("granularity", Json.string (inputGranularity input))
-            , ( "backpack"
-              , Json.object
-                  [ ("indefiniteUnits", Json.array (map indefiniteUnitJson indefiniteUnits))
-                  , ("expectedInstantiations", Json.array (map expectedInstantiationJson expectedInstantiations))
-                  ]
-              )
-            , ( "expectedOutputs"
-              , Json.object
-                  [ ("componentGraphDrv", Json.bool True)
-                  , ("moduleGraphDrv", Json.bool True)
-                  , ("backpackGraphDrv", Json.bool True)
-                  ]
-              )
-            ]
+        ( encodeProjectSkeleton
+            ProjectSkeleton
+              { skeletonPath = "" -- native-only provenance; unused on the WASM side
+              , projectKey = projectKey
+              , localPackages = localPackages
+              , sourceRepos = projectSourceRepos cabalProject
+              , planCacheKey = planCacheKey
+              , plannerDrvInputs = []
+              , granularity = inputGranularity input
+              , backpack =
+                  BackpackSkeleton
+                    { indefiniteUnits = indefiniteUnits
+                    , expectedInstantiations = expectedInstantiations
+                    }
+              , expectedOutputs =
+                  ExpectedOutputs
+                    { componentGraphDrv = True
+                    , moduleGraphDrv = True
+                    , backpackGraphDrv = True
+                    }
+              }
         )
     )
   where
@@ -191,8 +166,8 @@ parseManifest manifest = parseCabalFile (manifestPath manifest) (manifestCabalTe
 comparePackage :: LocalPackage -> LocalPackage -> Ordering
 comparePackage left right =
   compare
-    (localPackageName left, localPackageVersion left, localPackageComponents left)
-    (localPackageName right, localPackageVersion right, localPackageComponents right)
+    (packageName left, packageVersion left, packageComponents left)
+    (packageName right, packageVersion right, packageComponents right)
 
 parseNormalizeInput :: String -> Either String NormalizeInput
 parseNormalizeInput text = do
@@ -214,13 +189,13 @@ parseNormalizeInput text = do
   NormalizeInput
     <$> optionalString "srcTreeDigest" fields
     <*> optionalArray "sourceManifest" parseSourceManifestEntry fields
-    <*> requiredString "compiler" fields
-    <*> requiredString "indexState" fields
+    <*> (CompilerId <$> requiredString "compiler" fields)
+    <*> (IndexState <$> requiredString "indexState" fields)
     <*> requiredString "cabalProjectText" fields
     <*> requiredArray "localPackageManifests" parseLocalPackageManifest fields
     <*> optionalBoolMap "flags" fields
-    <*> requiredString "materializationMode" fields
-    <*> requiredString "granularity" fields
+    <*> requiredParsed "materializationMode" parseMaterializationMode fields
+    <*> requiredParsed "granularity" parseGranularity fields
 
 parseSourceManifestEntry :: Json -> Either String SourceManifestEntry
 parseSourceManifestEntry value = do
@@ -228,7 +203,7 @@ parseSourceManifestEntry value = do
   rejectUnknown "sourceManifest entry" ["path", "kind", "sha256"] fields
   SourceManifestEntry
     <$> requiredString "path" fields
-    <*> requiredString "kind" fields
+    <*> requiredParsed "kind" parseSourceKind fields
     <*> requiredString "sha256" fields
 
 parseLocalPackageManifest :: Json -> Either String LocalPackageManifest
@@ -277,14 +252,6 @@ normalizeSourceManifest entries = do
         (path /= "." && not ("/" `isPrefixOf` path) && ".." `notElem` splitOn '/' path)
         ("source manifest path must be relative and non-empty, got `" ++ sourcePath entry ++ "`")
       require
-        (sourceKind entry == "regular")
-        ( "source manifest only supports regular files, got `"
-            ++ sourceKind entry
-            ++ "` at `"
-            ++ path
-            ++ "`"
-        )
-      require
         (length sha == 64 && all isLowerHex sha)
         ("source manifest sha256 must be 64 lowercase hex characters at `" ++ path ++ "`")
       pure entry {sourcePath = path}
@@ -295,13 +262,17 @@ normalizeSourceManifest entries = do
     duplicatePaths _ = []
 
 normalizeFlags :: [(String, Bool)] -> [(String, Bool)]
-normalizeFlags = sort . map (\(name, enabled) -> (map toLower (trim name), enabled))
+normalizeFlags = sort . foldl insertNormalized [] . sort
+  where
+    insertNormalized flags (name, enabled) =
+      let normalized = map toLower (trim name)
+       in (normalized, enabled) : filter ((/= normalized) . fst) flags
 
 parseCabalProject :: String -> Either String CabalProject
 parseCabalProject text = go (logicalLines text) [] []
   where
     go [] packages repos = Right (CabalProject (sortNub packages) (sort repos))
-    go allLines@(line : rest) packages repos
+    go (line : rest) packages repos
       | logicalIndent line /= 0 = malformed line
       | logicalText line == "source-repository-package" = do
           (repo, remaining) <- parseSourceRepo rest []
@@ -421,7 +392,7 @@ parseComponent path header allLines fields =
                   (splitModuleList . (`lookup` fields))
                   ["exposed-modules", "other-modules", "generated-other-modules"]
                   ++ [ "Main"
-                     | stanzaKind header `elem` [Executable, TestSuite, Benchmark]
+                     | stanzaKind header `elem` [ExecutableKind, TestSuiteKind, BenchmarkKind]
                      , lookup "main-is" fields /= Nothing
                      ]
               )
@@ -446,36 +417,47 @@ parseStanzaHeader :: String -> Maybe StanzaHeader
 parseStanzaHeader text =
   case words text of
     [kind]
-      | lower kind == "library" -> Just (StanzaHeader Library Nothing)
-    [kind, name] ->
-      case lower kind of
-        "library" -> Just (StanzaHeader Library (Just name))
-        "executable" -> Just (StanzaHeader Executable (Just name))
-        "test-suite" -> Just (StanzaHeader TestSuite (Just name))
-        "benchmark" -> Just (StanzaHeader Benchmark (Just name))
-        _ -> Nothing
+      | Right LibraryKind <- parseComponentKind (lower kind) -> Just MainLibraryHeader
+    [kind, name] -> NamedComponentHeader <$> eitherToMaybe (parseComponentKind (lower kind)) <*> pure name
     _ -> Nothing
+
+stanzaKind :: StanzaHeader -> ComponentKind
+stanzaKind header =
+  case header of
+    MainLibraryHeader -> LibraryKind
+    NamedComponentHeader kind _ -> kind
+
+stanzaName :: StanzaHeader -> Maybe String
+stanzaName header =
+  case header of
+    MainLibraryHeader -> Nothing
+    NamedComponentHeader _ name -> Just name
 
 componentId :: StanzaHeader -> String
 componentId header =
-  case (stanzaKind header, stanzaName header) of
-    (Library, Nothing) -> "lib"
-    (Library, Just name) -> "lib:" ++ name
-    (Executable, Just name) -> "exe:" ++ name
-    (TestSuite, Just name) -> "test:" ++ name
-    (Benchmark, Just name) -> "bench:" ++ name
-    _ -> "unknown"
+  case header of
+    MainLibraryHeader -> "lib"
+    NamedComponentHeader LibraryKind name -> "lib:" ++ name
+    NamedComponentHeader ExecutableKind name -> "exe:" ++ name
+    NamedComponentHeader TestSuiteKind name -> "test:" ++ name
+    NamedComponentHeader BenchmarkKind name -> "bench:" ++ name
+
+eitherToMaybe :: Either a b -> Maybe b
+eitherToMaybe value =
+  case value of
+    Left _ -> Nothing
+    Right result -> Just result
 
 localPackageFromCabal :: CabalPackage -> LocalPackage
 localPackageFromCabal package =
   LocalPackage
-    { localPackageName = cabalPackageName package
-    , localPackageVersion = cabalPackageVersion package
-    , localPackageComponents = sortNub (map cabalComponentId components)
-    , localComponentDetails = sort (map localComponentFromCabal components)
-    , localPackageSignatures = sortNub (concatMap cabalSignatures components)
-    , localPackageRequiredSignatures = sortNub (concatMap cabalRequiredSignatures components)
-    , localPackageProvidedModules = sortNub (concatMap cabalProvidedModules components)
+    { packageName = cabalPackageName package
+    , packageVersion = cabalPackageVersion package
+    , packageComponents = sortNub (map cabalComponentId components)
+    , packageComponentDetails = sort (map localComponentFromCabal components)
+    , packageSignatures = sortNub (concatMap cabalSignatures components)
+    , packageRequiredSignatures = sortNub (concatMap cabalRequiredSignatures components)
+    , packageProvidedModules = sortNub (concatMap cabalProvidedModules components)
     }
   where
     components = cabalPackageComponents package
@@ -483,13 +465,13 @@ localPackageFromCabal package =
 localComponentFromCabal :: CabalComponent -> LocalComponent
 localComponentFromCabal component =
   LocalComponent
-    { localComponentId = cabalComponentId component
-    , localComponentKind = componentKindName (cabalComponentKind component)
-    , localProvidedModules = cabalProvidedModules component
-    , localSignatures = cabalSignatures component
-    , localRequiredSignatures = cabalRequiredSignatures component
-    , localMixins = cabalMixins component
-    , localReexportedModules = cabalReexportedModules component
+    { componentName = cabalComponentId component
+    , componentKind = cabalComponentKind component
+    , componentProvidedModules = cabalProvidedModules component
+    , componentSignatures = cabalSignatures component
+    , componentRequiredSignatures = cabalRequiredSignatures component
+    , componentMixins = cabalMixins component
+    , componentReexportedModules = cabalReexportedModules component
     }
 
 indefiniteUnitsFromPackage :: CabalPackage -> [IndefiniteUnit]
@@ -539,26 +521,26 @@ canonicalProjectJson :: NormalizeInput -> String -> [(String, Bool)] -> [LocalPa
 canonicalProjectJson input sourceDigest flags manifests localPackages cabalProject =
   Json.object
     [ ("srcTreeDigest", Json.string sourceDigest)
-    , ("compiler", Json.string (inputCompiler input))
-    , ("indexState", Json.string (inputIndexState input))
+    , ("compiler", Json.string (renderCompilerId (inputCompiler input)))
+    , ("indexState", Json.string (renderIndexState (inputIndexState input)))
     , ("cabalProjectText", Json.string (inputCabalProjectText input))
     , ("cabalProjectPackages", stringArray (projectPackages cabalProject))
     , ("localPackageManifests", Json.array (map localPackageManifestJson manifests))
-    , ("localPackages", Json.array (map localPackageJson localPackages))
+    , ("localPackages", Json.array (map encodeLocalPackage localPackages))
     , ("flags", boolMapJson flags)
-    , ("materializationMode", Json.string (inputMaterializationMode input))
-    , ("granularity", Json.string (inputGranularity input))
+    , ("materializationMode", Json.string (renderMaterializationMode (inputMaterializationMode input)))
+    , ("granularity", Json.string (renderGranularity (inputGranularity input)))
     ]
 
-planKeyJson :: String -> String -> String -> String -> [(String, Bool)] -> [LocalPackage] -> Json
+planKeyJson :: String -> CompilerId -> IndexState -> Granularity -> [(String, Bool)] -> [LocalPackage] -> Json
 planKeyJson projectKey compiler indexState granularity flags localPackages =
   Json.object
     [ ("projectKey", Json.string projectKey)
-    , ("compiler", Json.string compiler)
-    , ("indexState", Json.string indexState)
-    , ("granularity", Json.string granularity)
+    , ("compiler", Json.string (renderCompilerId compiler))
+    , ("indexState", Json.string (renderIndexState indexState))
+    , ("granularity", Json.string (renderGranularity granularity))
     , ("flags", boolMapJson flags)
-    , ("localPackages", Json.array (map localPackageJson localPackages))
+    , ("localPackages", Json.array (map encodeLocalPackage localPackages))
     ]
 
 digestJson :: Json -> String
@@ -568,7 +550,7 @@ sourceManifestJson :: SourceManifestEntry -> Json
 sourceManifestJson entry =
   Json.object
     [ ("path", Json.string (sourcePath entry))
-    , ("kind", Json.string (sourceKind entry))
+    , ("kind", Json.string (renderSourceKind (sourceKind entry)))
     , ("sha256", Json.string (sourceSha256 entry))
     ]
 
@@ -579,65 +561,11 @@ localPackageManifestJson manifest =
     , ("cabalText", Json.string (manifestCabalText manifest))
     ]
 
-localPackageJson :: LocalPackage -> Json
-localPackageJson package =
-  Json.object
-    [ ("name", Json.string (localPackageName package))
-    , ("version", Json.string (localPackageVersion package))
-    , ("components", stringArray (localPackageComponents package))
-    , ("componentDetails", Json.array (map localComponentJson (localComponentDetails package)))
-    , ("signatures", stringArray (localPackageSignatures package))
-    , ("requiredSignatures", stringArray (localPackageRequiredSignatures package))
-    , ("providedModules", stringArray (localPackageProvidedModules package))
-    ]
-
-localComponentJson :: LocalComponent -> Json
-localComponentJson component =
-  Json.object
-    [ ("component", Json.string (localComponentId component))
-    , ("kind", Json.string (localComponentKind component))
-    , ("providedModules", stringArray (localProvidedModules component))
-    , ("signatures", stringArray (localSignatures component))
-    , ("requiredSignatures", stringArray (localRequiredSignatures component))
-    , ("mixins", stringArray (localMixins component))
-    , ("reexportedModules", stringArray (localReexportedModules component))
-    ]
-
-indefiniteUnitJson :: IndefiniteUnit -> Json
-indefiniteUnitJson unit =
-  Json.object
-    [ ("unit", Json.string (indefiniteUnit unit))
-    , ("package", Json.string (indefinitePackage unit))
-    , ("component", Json.string (indefiniteComponent unit))
-    , ("signatures", stringArray (indefiniteSignatures unit))
-    , ("requiredSignatures", stringArray (indefiniteRequiredSignatures unit))
-    , ("mixins", stringArray (indefiniteMixins unit))
-    , ("reexportedModules", stringArray (indefiniteReexportedModules unit))
-    ]
-
-expectedInstantiationJson :: ExpectedInstantiation -> Json
-expectedInstantiationJson instantiation =
-  Json.object
-    [ ("unit", Json.string (instantiationUnit instantiation))
-    , ("holes", stringMapJson (instantiationHoles instantiation))
-    ]
-
 stringArray :: [String] -> Json
 stringArray = Json.array . map Json.string
 
-stringMapJson :: [(String, String)] -> Json
-stringMapJson = Json.object . map (\(name, value) -> (name, Json.string value)) . sort
-
 boolMapJson :: [(String, Bool)] -> Json
 boolMapJson = Json.object . map (\(name, value) -> (name, Json.bool value)) . sort
-
-componentKindName :: ComponentKind -> String
-componentKindName kind =
-  case kind of
-    Library -> "library"
-    Executable -> "executable"
-    TestSuite -> "test-suite"
-    Benchmark -> "benchmark"
 
 logicalLines :: String -> [LogicalLine]
 logicalLines text =
@@ -697,6 +625,7 @@ splitTopLevelList (Just value) = sortNub (splitTopLevelCommas value)
 splitTopLevelCommas :: String -> [String]
 splitTopLevelCommas = filter (not . null) . map trim . go 0 ""
   where
+    go :: Int -> String -> String -> [String]
     go _ current [] = [reverse current]
     go depth current (ch : rest)
       | ch == '(' = go (depth + 1) (ch : current) rest
@@ -752,6 +681,11 @@ requiredString name fields =
     Just (JsonString value) -> Right value
     Just _ -> Left ("input field `" ++ name ++ "` must be a string")
     Nothing -> Left ("input is missing required field `" ++ name ++ "`")
+
+requiredParsed :: String -> (String -> Either String a) -> [(String, Json)] -> Either String a
+requiredParsed name parser fields = do
+  value <- requiredString name fields
+  mapLeft (\err -> "input field `" ++ name ++ "`: " ++ err) (parser value)
 
 optionalString :: String -> [(String, Json)] -> Either String (Maybe String)
 optionalString name fields =
@@ -829,7 +763,6 @@ splitSubstring needle = go ""
     go prefix rest
       | needle `isPrefixOf` rest = Just (reverse prefix, drop (length needle) rest)
       | ch : remaining <- rest = go (ch : prefix) remaining
-      | otherwise = Nothing
 
 splitOn :: Char -> String -> [String]
 splitOn delimiter value =
@@ -869,7 +802,7 @@ simpleInput =
   Json.renderJson
     ( Json.object
         [ ("srcTreeDigest", Json.string ("blake3:" ++ replicate 64 'c'))
-        , ("compiler", Json.string "ghc-9.10.2")
+        , ("compiler", Json.string "test-compiler")
         , ("indexState", Json.string "2026-04-01T00:00:00Z")
         , ("cabalProjectText", Json.string "packages: .\n")
         , ( "localPackageManifests"
@@ -913,7 +846,7 @@ equivalentInput =
           )
         , ("cabalProjectText", Json.string "packages: .\n")
         , ("indexState", Json.string "2026-04-01T00:00:00Z")
-        , ("compiler", Json.string "ghc-9.10.2")
+        , ("compiler", Json.string "test-compiler")
         , ("srcTreeDigest", Json.string ("blake3:" ++ replicate 64 'c'))
         ]
     )

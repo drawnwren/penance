@@ -1,5 +1,5 @@
 {
-  description = "penance: Wasm-assisted dynamic Haskell/Nix build graph prototype";
+  description = "penance: GHC-Wasm-assisted dynamic Haskell/Nix build graph prototype";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -17,12 +17,7 @@
       ];
 
       forAllSystems = f:
-        builtins.listToAttrs (map
-          (system: {
-            name = system;
-            value = f system;
-          })
-          systems);
+        nixpkgs.lib.genAttrs systems f;
 
       # Single source for the benchmark package-set pins. The packages-section
       # proofs and the `nix run .#bench` env defaults both read these; the
@@ -38,6 +33,8 @@
           import ./nix/lib.nix {
             inherit pkgs;
             inherit (pkgs) lib;
+            ifaceCanonicalizer = self.packages.${system}.ghcWasmIfaceCanonicalizer;
+            repent = self.packages.${system}.repent;
           });
 
       packages = forAllSystems (system:
@@ -49,6 +46,13 @@
             inherit system;
             overlays = [ haskellNix.overlay ];
             inherit (haskellNix) config;
+          };
+          hackageIndexStates = import (haskellNix.inputs.hackage + "/index-state.nix");
+          repentCabalIndexState = pkgs.lib.last (builtins.attrNames hackageIndexStates);
+          repentCabalDir = haskellNixPkgs.haskell-nix.dotCabal {
+            index-state = repentCabalIndexState;
+            sha256 = hackageIndexStates.${repentCabalIndexState};
+            nix-tools = haskellNixPkgs.haskell-nix.nix-tools-unchecked;
           };
           hpkgs = pkgs.haskell.packages.ghc9102 or pkgs.haskellPackages;
           benchHpkgs = pkgs.haskell.packages.ghc9103 or hpkgs;
@@ -71,7 +75,7 @@
           moduleCutoff30Src = ./tests/fixtures/module-cutoff-30;
           simpleLibSrc = ./tests/fixtures/simple-lib;
           benchSrc = ./tests/bench/vs-haskell-nix/project;
-          benchLock = builtins.fromJSON (builtins.readFile (benchSrc + "/strata.lock"));
+          benchLock = builtins.fromJSON (builtins.readFile (benchSrc + "/penance.lock"));
           # Arc B seed: the module-granular prototype still invokes raw GHC,
           # but its external package flags come from the committed lock.
           benchGhcPackageNames =
@@ -168,15 +172,10 @@
           stackageStateVarSnapshotUrl = "https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/24/41.yaml";
           stackageStateVarSnapshotHash = "0309c4253d979705ab59973fd0c67e263e863ed7158bb4507f13165e46f20842";
           stackageStateVarSnapshotLine =
-            let
-              matches =
-                builtins.filter
-                  (line: pkgs.lib.hasPrefix "- hackage: StateVar-" line)
-                  (pkgs.lib.splitString "\n" (builtins.readFile stackageStateVarSnapshot));
-            in
-              if matches == []
-                then throw "StateVar is missing from ${stackageResolver} snapshot"
-                else builtins.head matches;
+            pkgs.lib.findFirst
+              (line: pkgs.lib.hasPrefix "- hackage: StateVar-" line)
+              (throw "StateVar is missing from ${stackageResolver} snapshot")
+              (pkgs.lib.splitString "\n" (builtins.readFile stackageStateVarSnapshot));
           stackageStateVarVersion =
             builtins.head
               (pkgs.lib.splitString "@"
@@ -212,7 +211,27 @@
             mainProgram = "penance-planner";
             license = pkgs.lib.licenses.mit;
           };
-          wasmPlannerNative = pkgs.runCommand "penance-wasm-planner-native-0.1.0" {
+          repentTool = pkgs.writeShellApplication {
+            name = "repent";
+            runtimeInputs = [
+              pkgs.cabal-install
+              pkgs.cabal2nix
+            ];
+            text = ''
+              export CABAL_DIR=${repentCabalDir}
+              export PENANCE_INDEX_STATE=''${PENANCE_INDEX_STATE:-${repentCabalIndexState}}
+              exec ${plannerBin}/bin/repent "$@"
+            '';
+          };
+          penanceDocs = pkgs.runCommand "penance-docs" {
+            nativeBuildInputs = [
+              pkgs.mdbook
+              pkgs.mdbook-mermaid
+            ];
+          } ''
+            mdbook build ${./.} --dest-dir "$out"
+          '';
+          plannerNormalizerNative = pkgs.runCommand "penance-planner-normalizer-native-0.1.0" {
             meta = {
               mainProgram = "normalize-project";
               license = pkgs.lib.licenses.mit;
@@ -222,7 +241,7 @@
             ln -s ${plannerBin}/bin/normalize-project "$out/bin/normalize-project"
             "$out/bin/normalize-project" --self-test
           '';
-          wasmPlannerBuiltin = pkgs.runCommand "penance-wasm-planner-ghc-wasm-0.1.0" {
+          ghcWasmPlanner = pkgs.runCommand "penance-planner-ghc-wasm-0.1.0" {
             nativeBuildInputs = [
               ghcWasm.packages.${system}.all_9_10
             ];
@@ -236,17 +255,188 @@
               -odir build \
               -hidir build \
               -optl-Wl,--allow-undefined \
-              -o "$out/planner.wasm" \
+              -o build/planner.wasm \
               ${./planner-bin/src/WasmBuiltinMain.hs}
+            wasm-opt -Oz build/planner.wasm -o "$out/planner.wasm"
           '';
-          # Determinate Nix consumes the GHC output through its WASI calling
-          # convention, so the standalone and builtin artifacts are identical.
-          wasmPlannerWasi = wasmPlannerBuiltin;
+          ghcWasmIfaceCanonicalizer = pkgs.runCommand "penance-iface-canonicalizer-ghc-wasm-0.1.0" {
+            nativeBuildInputs = [
+              ghcWasm.packages.${system}.all_9_10
+            ];
+            meta = {
+              mainProgram = "penance-iface-canon";
+              license = pkgs.lib.licenses.mit;
+            };
+          } ''
+            mkdir -p build "$out/bin" "$out/libexec"
+            wasm32-wasi-ghc \
+              -O2 \
+              -Wall \
+              -package ghc \
+              -odir build \
+              -hidir build \
+              -o build/penance-iface-canon.wasm \
+              ${./planner-bin/src/IfaceCanonMain.hs}
+            wasm-opt -Oz build/penance-iface-canon.wasm -o "$out/libexec/penance-iface-canon.wasm"
+            cat > "$out/bin/penance-iface-canon" <<EOF
+#!${pkgs.runtimeShell}
+if [ -n "\${TMPDIR:-}" ]; then
+  export HOME="\$TMPDIR"
+  export XDG_CACHE_HOME="\$TMPDIR/.cache"
+fi
+exec ${pkgs.wasmtime}/bin/wasmtime run --dir / "$out/libexec/penance-iface-canon.wasm" "\$@"
+EOF
+            chmod 0555 "$out/bin/penance-iface-canon"
+          '';
+          penanceIfaceCanonicalizerProof = pkgs.runCommand "penance-iface-canonicalizer-proof" {
+            nativeBuildInputs = [
+              ghcWasmIfaceCanonicalizer
+              pkgs.gawk
+              pkgs.gnugrep
+            ];
+          } ''
+            fixture=${./tests/fixtures/iface-canonicalizer}
+
+            compile_case() {
+              ghc="$1"
+              source="$2"
+              case_dir="$3"
+              mkdir -p "$case_dir"
+              cp "$source" "$case_dir/IfaceSubject.hs"
+              "$ghc" \
+                -O0 \
+                -fomit-interface-pragmas \
+                -fignore-interface-pragmas \
+                -fhide-source-paths \
+                -fforce-recomp \
+                -c "$case_dir/IfaceSubject.hs" \
+                -odir "$case_dir" \
+                -hidir "$case_dir"
+            }
+
+            prove_version() {
+              ghc="$1"
+              compiler_version="$("$ghc" --numeric-version)"
+              label="ghc-$compiler_version"
+              iface_version="$(printf '%s' "$compiler_version" | tr -d .)"
+              case "$iface_version" in
+                ""|*[!0-9]*)
+                  echo "$label: cannot derive interface version from GHC $compiler_version" >&2
+                  exit 1
+                  ;;
+              esac
+              root="$TMPDIR/$label"
+              canon="$root/canonical"
+
+              compile_case "$ghc" "$fixture/Baseline.hs" "$root/baseline"
+              compile_case "$ghc" "$fixture/BodyEdit.hs" "$root/body-edit"
+              compile_case "$ghc" "$fixture/ApiEdit.hs" "$root/api-edit"
+              mkdir -p "$canon" "$root/consumer"
+
+              if cmp -s "$root/baseline/IfaceSubject.hi" "$root/body-edit/IfaceSubject.hi"; then
+                echo "$label: raw interfaces unexpectedly ignored a body edit" >&2
+                exit 1
+              fi
+
+              penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject.hi" \
+                --expect-version "$iface_version"
+              penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-again.hi" \
+                --expect-version "$iface_version"
+              penance-iface-canon \
+                --input "$root/body-edit/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-body.hi" \
+                --expect-version "$iface_version"
+              penance-iface-canon \
+                --input "$root/api-edit/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-api.hi" \
+                --expect-version "$iface_version"
+              penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-dep-a.hi" \
+                --expect-version "$iface_version" \
+                --dependency-interface /nix/store/00000000000000000000000000000000-dep-a
+              penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-dep-b.hi" \
+                --expect-version "$iface_version" \
+                --dependency-interface /nix/store/00000000000000000000000000000000-dep-b
+              penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-deps-ab.hi" \
+                --expect-version "$iface_version" \
+                --dependency-interface /nix/store/00000000000000000000000000000000-dep-a \
+                --dependency-interface /nix/store/00000000000000000000000000000000-dep-b
+              penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$canon/IfaceSubject-deps-ba.hi" \
+                --expect-version "$iface_version" \
+                --dependency-interface /nix/store/00000000000000000000000000000000-dep-b \
+                --dependency-interface /nix/store/00000000000000000000000000000000-dep-a
+
+              cmp "$canon/IfaceSubject.hi" "$canon/IfaceSubject-again.hi"
+              cmp "$canon/IfaceSubject.hi" "$canon/IfaceSubject-body.hi"
+              if cmp -s "$canon/IfaceSubject.hi" "$canon/IfaceSubject-api.hi"; then
+                echo "$label: API edit did not change the canonical interface" >&2
+                exit 1
+              fi
+              if cmp -s "$canon/IfaceSubject-dep-a.hi" "$canon/IfaceSubject-dep-b.hi"; then
+                echo "$label: dependency interface change did not propagate" >&2
+                exit 1
+              fi
+              cmp "$canon/IfaceSubject-deps-ab.hi" "$canon/IfaceSubject-deps-ba.hi"
+
+              "$ghc" --show-iface "$canon/IfaceSubject.hi" > "$root/show-iface.txt"
+              awk '
+                /^exports:$/ { in_exports = 1; next }
+                /^module dependencies:/ { in_exports = 0 }
+                in_exports { print }
+              ' "$root/show-iface.txt" > "$root/exports.txt"
+              grep -Fx '  foo' "$root/exports.txt"
+              grep -Fx "  foo'" "$root/exports.txt"
+              grep -Fx '  unsigned' "$root/exports.txt"
+
+              cp "$fixture/Consumer.hs" "$root/consumer/Consumer.hs"
+              cp "$canon/IfaceSubject.hi" "$root/consumer/IfaceSubject.hi"
+              (
+                cd "$root/consumer"
+                "$ghc" \
+                  -O0 \
+                  -fomit-interface-pragmas \
+                  -fignore-interface-pragmas \
+                  -fhide-source-paths \
+                  -c Consumer.hs \
+                  -odir . \
+                  -hidir .
+              )
+
+              if penance-iface-canon \
+                --input "$root/baseline/IfaceSubject.hi" \
+                --output "$root/wrong-version.hi" \
+                --expect-version wrong; then
+                echo "$label: wrong producer version was accepted" >&2
+                exit 1
+              fi
+            }
+
+            prove_version ${hpkgs.ghc}/bin/ghc
+            prove_version ${benchHpkgs.ghc}/bin/ghc
+
+            mkdir -p "$out"
+            printf '%s\n' \
+              'GHC-Wasm canonicalizer proof passed for every configured native GHC.' \
+              > "$out/proof.txt"
+          '';
           penanceLib = import ./nix/lib.nix {
             inherit pkgs;
             inherit (pkgs) lib;
             plannerWasm = ./nix/planner.wasm;
             penancePlanner = plannerBin;
+            ifaceCanonicalizer = ghcWasmIfaceCanonicalizer;
+            repent = repentTool;
           };
           simpleLibComponent = (penanceLib.penanceProject {
             src = ./tests/fixtures/simple-lib;
@@ -350,7 +540,7 @@
                 --out "$out/module-order.txt"
               penance-plan module-plan \
                 --makefile "$out/module-deps.mk" \
-                --lock strata.lock \
+                --lock penance.lock \
                 --component exe:penance-bench \
                 --out "$out/module-plan.json"
 
@@ -890,52 +1080,56 @@
                   ++ testComponents
                   ++ benchmarkComponents;
               });
-          penanceLockBench = pkgs.runCommand "penance-lock-bench" {
+          repentBench = pkgs.runCommand "repent-bench" {
             nativeBuildInputs = [
               pkgs.jq
-              plannerBin
+              repentTool
             ];
           } ''
             mkdir -p "$out"
-            penance-lock \
+            repent \
               --project ${benchSrc} \
               --compiler ghc-9.10.2 \
+              --ghc-pkg ${hpkgs.ghc}/bin/ghc-pkg \
               --index-state 2026-02-01T00:00:00Z \
-              --check ${benchSrc}/strata.lock \
-              --out "$out/strata.lock"
+              --check ${benchSrc}/penance.lock \
+              --out "$out/penance.lock"
 
-            penance-lock \
+            repent \
               --project ${lockExternalSrc} \
               --compiler ghc-9.10.2 \
+              --ghc-pkg ${hpkgs.ghc}/bin/ghc-pkg \
               --index-state 2026-02-01T00:00:00Z \
               --out "$out/lock-external-1.lock"
-            penance-lock \
+            repent \
               --project ${lockExternalSrc} \
               --compiler ghc-9.10.2 \
+              --ghc-pkg ${hpkgs.ghc}/bin/ghc-pkg \
               --index-state 2026-02-01T00:00:00Z \
               --out "$out/lock-external-2.lock"
             cmp "$out/lock-external-1.lock" "$out/lock-external-2.lock"
-            cmp "$out/lock-external-1.lock" ${lockExternalSrc}/strata.lock
-            cp "$out/lock-external-1.lock" "$out/lock-external.strata.lock"
+            cmp "$out/lock-external-1.lock" ${lockExternalSrc}/penance.lock
+            cp "$out/lock-external-1.lock" "$out/lock-external.penance.lock"
 
             jq -e '
-              .schema == "penance/strata-lock/1"
+              .schema == "penance/lock/1"
               and any(.externalUnits[]; .name == "StateVar" and .version == "1.2.2" and .source == "hackage" and (.sdist.sha256 | length > 0))
               and any(.externalUnits[]; .name == "base" and .source == "ghc-boot")
-            ' "$out/lock-external.strata.lock" >/dev/null
+            ' "$out/lock-external.penance.lock" >/dev/null
 
             scratch="$(mktemp -d "$TMPDIR/lock-external-stale.XXXXXX")"
             trap 'rm -rf "$scratch"' EXIT
             cp -R ${lockExternalSrc}/. "$scratch/"
             chmod -R u+w "$scratch"
             sed -i 's/StateVar >=1\.2 && <1\.3/StateVar >=1.2 \&\& <1.3,\n    bytestring/' "$scratch/lock-external.cabal"
-            if penance-lock \
+            if repent \
               --project "$scratch" \
               --compiler ghc-9.10.2 \
+              --ghc-pkg ${hpkgs.ghc}/bin/ghc-pkg \
               --index-state 2026-02-01T00:00:00Z \
-              --check ${lockExternalSrc}/strata.lock \
+              --check ${lockExternalSrc}/penance.lock \
               > "$out/stale-lock.log" 2>&1; then
-              echo "penance-lock --check unexpectedly accepted a stale lock" >&2
+              echo "repent --check unexpectedly accepted a stale lock" >&2
               exit 1
             fi
           '';
@@ -1325,7 +1519,7 @@
 
               penance-plan module-plan \
                 --makefile "$TMPDIR/module-deps.mk" \
-                --lock strata.lock \
+                --lock penance.lock \
                 --component exe:penance-bench \
                 --out "$TMPDIR/module-plan.json"
 
@@ -1345,7 +1539,7 @@ FLAGS
                   pkgs.coreutils
                   pkgs.findutils
                   pkgs.gnugrep
-                  pkgs.perl
+                  ghcWasmIfaceCanonicalizer
                   benchHpkgs.ghc
                 ])} \
                 --ghc-flags "$TMPDIR/ghc-flags.txt" \
@@ -1356,7 +1550,7 @@ FLAGS
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.coreutils.drvPath)} \
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.findutils.drvPath)} \
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.gnugrep.drvPath)} \
-                --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.perl.drvPath)}
+                --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext ghcWasmIfaceCanonicalizer.drvPath)}
               cp "$TMPDIR/root.drv" "$out"
             '';
           penanceBenchDyndrvPlanner =
@@ -1419,7 +1613,7 @@ FLAGS
 
                   penance-plan module-plan \
                     --makefile "$work/module-deps.mk" \
-                    --lock strata.lock \
+                    --lock penance.lock \
                     --component exe:penance-bench \
                     --out "$work/module-plan.json"
 
@@ -1439,7 +1633,7 @@ FLAGS
                       pkgs.coreutils
                       pkgs.findutils
                       pkgs.gnugrep
-                      pkgs.perl
+                      ghcWasmIfaceCanonicalizer
                       benchHpkgs.ghc
                     ])} \
                     --ghc-flags "$work/ghc-flags.txt" \
@@ -1450,7 +1644,7 @@ FLAGS
                     --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.coreutils.drvPath)} \
                     --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.findutils.drvPath)} \
                     --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.gnugrep.drvPath)} \
-                    --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.perl.drvPath)}
+                    --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext ghcWasmIfaceCanonicalizer.drvPath)}
                 )
               }
 
@@ -1523,7 +1717,7 @@ FLAGS
 
               penance-plan module-plan \
                 --makefile "$TMPDIR/module-deps.mk" \
-                --lock strata.lock \
+                --lock penance.lock \
                 --component exe:module-cutoff-30 \
                 --out "$TMPDIR/module-plan.json"
 
@@ -1546,7 +1740,7 @@ FLAGS
                   pkgs.coreutils
                   pkgs.findutils
                   pkgs.gnugrep
-                  pkgs.perl
+                  ghcWasmIfaceCanonicalizer
                   benchHpkgs.ghc
                 ])} \
                 --ghc-flags "$TMPDIR/ghc-flags.txt" \
@@ -1557,7 +1751,7 @@ FLAGS
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.coreutils.drvPath)} \
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.findutils.drvPath)} \
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.gnugrep.drvPath)} \
-                --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.perl.drvPath)}
+                --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext ghcWasmIfaceCanonicalizer.drvPath)}
               cp "$TMPDIR/root.drv" "$out"
             '';
           penanceModuleCutoff30Dyndrv =
@@ -1611,7 +1805,7 @@ FLAGS
 
               penance-plan module-plan \
                 --makefile "$TMPDIR/module-deps.mk" \
-                --lock strata.lock \
+                --lock penance.lock \
                 --component exe:hs-boot-th \
                 --out "$TMPDIR/module-plan.json"
 
@@ -1642,7 +1836,7 @@ FLAGS
                   pkgs.coreutils
                   pkgs.findutils
                   pkgs.gnugrep
-                  pkgs.perl
+                  ghcWasmIfaceCanonicalizer
                   benchHpkgs.ghc
                 ])} \
                 --ghc-flags "$TMPDIR/ghc-flags.txt" \
@@ -1653,7 +1847,7 @@ FLAGS
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.coreutils.drvPath)} \
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.findutils.drvPath)} \
                 --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.gnugrep.drvPath)} \
-                --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext pkgs.perl.drvPath)}
+                --tool-drv ${pkgs.lib.escapeShellArg (builtins.unsafeDiscardStringContext ghcWasmIfaceCanonicalizer.drvPath)}
               cp "$TMPDIR/root.drv" "$out"
             '';
           penanceHsBootThDyndrv =
@@ -1698,7 +1892,7 @@ FLAGS
               ghc -M "''${dep_flags[@]}" -dep-makefile "$out/module-deps.mk" app/Main.hs src/Cycle/*.hs src/TH/*.hs
               penance-plan module-plan \
                 --makefile "$out/module-deps.mk" \
-                --lock strata.lock \
+                --lock penance.lock \
                 --component exe:hs-boot-th \
                 --out "$out/module-plan.json"
 
@@ -1812,7 +2006,7 @@ FLAGS
           haskellNixMscBundle =
             mkMscBundle "haskell-nix-msc-bundle" haskellNixBenchExe;
           penanceLockCacheManifest =
-            mkLockCacheManifest "penance-lock-cache-manifest" (benchSrc + "/strata.lock") penanceBenchViaLock;
+            mkLockCacheManifest "penance-cache-manifest" (benchSrc + "/penance.lock") penanceBenchViaLock;
           penanceProjectVariants =
             pkgs.runCommand "penance-project-variants" {} ''
               mkdir -p "$out/variants" "$out/nix-support"
@@ -1827,7 +2021,7 @@ FLAGS
               cmp ${penanceBenchDyndrv}/output.txt "$out/granularity-module.out"
 
               cat > "$out/variants.json" <<'JSON'
-              {"schema":"penance/project-variants/1","variants":["granularity-unit","granularity-module","ghcOptions-O0"],"granularity":{"unit":"penanceBenchViaLock","module":"penanceBenchDyndrv","sameLock":"tests/bench/vs-haskell-nix/project/strata.lock","outputsEquivalent":true}}
+              {"schema":"penance/project-variants/1","variants":["granularity-unit","granularity-module","ghcOptions-O0"],"granularity":{"unit":"penanceBenchViaLock","module":"penanceBenchDyndrv","sameLock":"tests/bench/vs-haskell-nix/project/penance.lock","outputsEquivalent":true}}
               JSON
             '';
           haskellNixProjectVariants =
@@ -1912,11 +2106,13 @@ FLAGS
             penanceHsBootThDyndrvPlanner
             penanceLockExternalViaLock
             plannerBin
-            penanceLockBench
+            repentBench
             penanceLockCacheManifest
             penanceBenchComponent
             penanceBenchModule
             penanceModuleGranularBench
+            penanceDocs
+            penanceIfaceCanonicalizerProof
             penanceMscBundle
             penancePrimitiveProbes
             penanceProbePlanner
@@ -1932,11 +2128,13 @@ FLAGS
             penanceStackageStateVar
             penanceWarpLoop
             simpleLibComponent
-            wasmPlannerBuiltin
-            wasmPlannerNative
-            wasmPlannerWasi
+            ghcWasmIfaceCanonicalizer
+            ghcWasmPlanner
+            plannerNormalizerNative
             ;
-          default = wasmPlannerNative;
+          default = plannerNormalizerNative;
+          docs = penanceDocs;
+          repent = repentTool;
         });
 
       checks = forAllSystems (system:
@@ -1944,7 +2142,9 @@ FLAGS
           pkgs = import nixpkgs { inherit system; };
         in
         {
-          wasm-planner = self.packages.${system}.wasmPlannerNative;
+          ghc-wasm-planner = self.packages.${system}.plannerNormalizerNative;
+          ghc-wasm-iface-canonicalizer = self.packages.${system}.ghcWasmIfaceCanonicalizer;
+          ghc-wasm-iface-canonicalizer-proof = self.packages.${system}.penanceIfaceCanonicalizerProof;
           simple-lib-component = self.packages.${system}.simpleLibComponent;
           backpack-signatures-module = self.packages.${system}.backpackSignaturesModule;
           backpack-multi-instance-module = self.packages.${system}.backpackMultiInstanceModule;
@@ -2123,6 +2323,29 @@ FLAGS
       apps = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          validationGhc = self.packages.${system}.penanceBenchShellGhc;
+          validationGhcVersionParts = pkgs.lib.splitString "." validationGhc.version;
+          validationCompiler = "ghc-${validationGhc.version}";
+          validationCompilerNixName =
+            "ghc${pkgs.lib.concatStrings (pkgs.lib.take 2 validationGhcVersionParts)}";
+          serveDocs = pkgs.writeShellApplication {
+            name = "penance-docs";
+            runtimeInputs = [
+              pkgs.mdbook
+              pkgs.mdbook-mermaid
+            ];
+            text = ''
+              book_root=''${PENANCE_DOCS_ROOT:-$PWD}
+              if [ ! -f "$book_root/book.toml" ]; then
+                book_root=${self}
+              fi
+
+              exec mdbook serve "$book_root" \
+                --hostname "''${PENANCE_DOCS_HOST:-127.0.0.1}" \
+                --port "''${PENANCE_DOCS_PORT:-3000}" \
+                "$@"
+            '';
+          };
           benchVsHaskellNix = pkgs.writeShellApplication {
             name = "bench-vs-haskell-nix";
             runtimeInputs = [
@@ -2151,6 +2374,8 @@ FLAGS
                 export PENANCE_NIX_BIN=''${PENANCE_NIX_BIN:-/nix/var/nix/profiles/default/bin/nix}
               fi
               export PENANCE_REPO=''${PENANCE_REPO:-${self}}
+              export PENANCE_COMPILER=''${PENANCE_COMPILER:-${validationCompiler}}
+              export PENANCE_COMPILER_NIX_NAME=''${PENANCE_COMPILER_NIX_NAME:-${validationCompilerNixName}}
               exec ${./scripts/validate-hackage-package.sh} "$@"
             '';
           };
@@ -2240,11 +2465,11 @@ FLAGS
               "$nix_bin" "''${nix_common[@]}" eval --expr 'builtins.hasAttr "outputOf" builtins' > "$out_root/outputOf.txt"
               grep -q true "$out_root/outputOf.txt"
               "$nix_bin" "''${nix_common[@]}" eval --option allow-import-from-derivation false \
-                --raw "$flake_dir#penanceBenchViaLock.drvPath" > "$out_root/no-ifd-penanceBenchViaLock.drvPath"
+                --raw "path:$flake_dir#penanceBenchViaLock.drvPath" > "$out_root/no-ifd-penanceBenchViaLock.drvPath"
               "$nix_bin" "''${nix_common[@]}" eval --option allow-import-from-derivation false \
-                --raw "$flake_dir#penanceSimpleLibViaLock.drvPath" > "$out_root/no-ifd-penanceSimpleLibViaLock.drvPath"
+                --raw "path:$flake_dir#penanceSimpleLibViaLock.drvPath" > "$out_root/no-ifd-penanceSimpleLibViaLock.drvPath"
               "$nix_bin" "''${nix_common[@]}" eval --option allow-import-from-derivation false \
-                --raw "$flake_dir#penanceLockExternalViaLock.drvPath" > "$out_root/no-ifd-penanceLockExternalViaLock.drvPath"
+                --raw "path:$flake_dir#penanceLockExternalViaLock.drvPath" > "$out_root/no-ifd-penanceLockExternalViaLock.drvPath"
 
               write_hi_hashes() {
                 local root="$1"
@@ -2272,22 +2497,22 @@ FLAGS
                 fi
               }
 
-              "$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceProbePlannerConsumer" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceProbePlannerConsumer" \
                 --no-link -L > "$out_root/logs/consumer-build.log" 2>&1
 
-              plan_drv="$("$nix_bin" "''${nix_common[@]}" eval --raw "$flake_dir#penanceProbePlanner.drvPath")"
+              plan_drv="$("$nix_bin" "''${nix_common[@]}" eval --raw "path:$flake_dir#penanceProbePlanner.drvPath")"
               printf "%s\n" "$plan_drv" > "$out_root/planner-drv.txt"
               "$nix_bin" "''${nix_common[@]}" build "$plan_drv^out^out" \
                 --no-link -L > "$out_root/logs/cli-chain.log" 2>&1
 
-              "$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceProbePlannerConsumer" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceProbePlannerConsumer" \
                 --no-link -L > "$out_root/logs/no-op-build.log" 2>&1
               if grep -q "building '" "$out_root/logs/no-op-build.log"; then
                 echo "second planner-consumer build rebuilt derivations unexpectedly" >&2
                 exit 1
               fi
 
-              base_plan_out="$("$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceProbePlanner" \
+              base_plan_out="$("$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceProbePlanner" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/planner-build.log" | tail -n 1)"
               test -n "$base_plan_out"
               printf "%s\n" "$base_plan_out" > "$out_root/planner-output.txt"
@@ -2303,9 +2528,9 @@ FLAGS
                 "$flake_dir/" "$det_scratch/"
               chmod -R u+w "$det_scratch"
               printf "determinism %s\n" "$stamp" > "$det_scratch/tests/probes/determinism-salt.txt"
-              det_a="$("$nix_bin" "''${nix_common[@]}" build "$det_scratch#penanceProbePlannerDeterminismA" \
+              det_a="$("$nix_bin" "''${nix_common[@]}" build "path:$det_scratch#penanceProbePlannerDeterminismA" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/planner-determinism-a.log" | tail -n 1)"
-              det_b="$("$nix_bin" "''${nix_common[@]}" build "$det_scratch#penanceProbePlannerDeterminismB" \
+              det_b="$("$nix_bin" "''${nix_common[@]}" build "path:$det_scratch#penanceProbePlannerDeterminismB" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/planner-determinism-b.log" | tail -n 1)"
               test -n "$det_a"
               test -n "$det_b"
@@ -2316,9 +2541,9 @@ FLAGS
                 | sed -E 's#/nix/store/[0-9a-z]{32}-[A-Za-z0-9._+?=-]+#<store-path>#g' \
                 > "$out_root/planner-determinism-b.json"
               cmp "$out_root/planner-determinism-a.json" "$out_root/planner-determinism-b.json"
-              bad_a="$("$nix_bin" "''${nix_common[@]}" build "$det_scratch#penanceProbePlannerDeterminismBadA" \
+              bad_a="$("$nix_bin" "''${nix_common[@]}" build "path:$det_scratch#penanceProbePlannerDeterminismBadA" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/planner-determinism-bad-a.log" | tail -n 1)"
-              bad_b="$("$nix_bin" "''${nix_common[@]}" build "$det_scratch#penanceProbePlannerDeterminismBadB" \
+              bad_b="$("$nix_bin" "''${nix_common[@]}" build "path:$det_scratch#penanceProbePlannerDeterminismBadB" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/planner-determinism-bad-b.log" | tail -n 1)"
               test -n "$bad_a"
               test -n "$bad_b"
@@ -2334,21 +2559,21 @@ FLAGS
               fi
               rm -rf "$det_scratch"
 
-              add_consumer_out="$("$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceAddPathConsumer" \
+              add_consumer_out="$("$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceAddPathConsumer" \
                 --print-out-paths --no-link -L > "$out_root/logs/add-path-consumer.stdout" 2> "$out_root/logs/add-path-consumer.log" && tail -n 1 "$out_root/logs/add-path-consumer.stdout")"
               test -n "$add_consumer_out"
               cmp "$add_consumer_out/payload.txt" "$flake_dir/tests/probes/add-path-payload.txt"
-              add_plan_drv="$("$nix_bin" "''${nix_common[@]}" eval --raw "$flake_dir#penanceAddPathPlanner.drvPath")"
+              add_plan_drv="$("$nix_bin" "''${nix_common[@]}" eval --raw "path:$flake_dir#penanceAddPathPlanner.drvPath")"
               printf "%s\n" "$add_plan_drv" > "$out_root/add-path-planner-drv.txt"
               "$nix_bin" "''${nix_common[@]}" build "$add_plan_drv^out^out" \
                 --no-link -L > "$out_root/logs/add-path-cli-chain.log" 2>&1
-              "$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceAddPathConsumer" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceAddPathConsumer" \
                 --no-link -L > "$out_root/logs/add-path-no-op-build.log" 2>&1
               if grep -q "building '" "$out_root/logs/add-path-no-op-build.log"; then
                 echo "second add-path consumer build rebuilt derivations unexpectedly" >&2
                 exit 1
               fi
-              add_plan_out="$("$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceAddPathPlanner" \
+              add_plan_out="$("$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceAddPathPlanner" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/add-path-planner-build.log" | tail -n 1)"
               test -n "$add_plan_out"
               printf "%s\n" "$add_plan_out" > "$out_root/add-path-planner-output.txt"
@@ -2357,9 +2582,9 @@ FLAGS
               child_count="$(grep -o '"[0-9a-z]\{32\}-penance-add-path-planner\.drv"' "$out_root/add-path-child.json" | wc -l | tr -d ' ')"
               test "$child_count" = 1
 
-              "$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceCaCutoffToy" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceCaCutoffToy" \
                 --no-link -L > "$out_root/logs/ca-toy-baseline.log" 2>&1
-              "$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceCaCutoffToy" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceCaCutoffToy" \
                 --no-link -L > "$out_root/logs/ca-toy-no-op.log" 2>&1
               if grep -q "building '" "$out_root/logs/ca-toy-no-op.log"; then
                 echo "second CA cutoff toy build rebuilt derivations unexpectedly" >&2
@@ -2368,8 +2593,10 @@ FLAGS
 
               hi_soak_count=5
               hi_hash_count=0
+              "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceBenchLibViaLock^iface" \
+                --no-link -L > "$out_root/logs/hi-soak-seed.log" 2>&1
               for run in $(seq 1 "$hi_soak_count"); do
-                hi_out="$("$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceBenchLibViaLock.iface" \
+                hi_out="$("$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceBenchLibViaLock^iface" \
                   --rebuild --print-out-paths --no-link -L \
                   > "$out_root/logs/hi-soak-$run.stdout" \
                   2> "$out_root/logs/hi-soak-$run.log" && tail -n 1 "$out_root/logs/hi-soak-$run.stdout")"
@@ -2406,7 +2633,7 @@ FLAGS
               chmod -R u+w "$scratch"
               printf "hello dynamic child edited %s\n" "$stamp" > "$scratch/tests/probes/planner-payload.txt"
               printf "hello recursive add-path edited %s\n" "$stamp" > "$scratch/tests/probes/add-path-payload.txt"
-              edited_plan_out="$("$nix_bin" "''${nix_common[@]}" build "$scratch#penanceProbePlanner" \
+              edited_plan_out="$("$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceProbePlanner" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/liveness-build.log" | tail -n 1)"
               test -n "$edited_plan_out"
               printf "%s\n" "$edited_plan_out" > "$out_root/planner-output-edited.txt"
@@ -2414,7 +2641,7 @@ FLAGS
                 echo "editing the probe payload did not change the emitted child drv path" >&2
                 exit 1
               fi
-              edited_add_plan_out="$("$nix_bin" "''${nix_common[@]}" build "$scratch#penanceAddPathPlanner" \
+              edited_add_plan_out="$("$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceAddPathPlanner" \
                 --print-out-paths --no-link -L 2> "$out_root/logs/add-path-liveness-build.log" | tail -n 1)"
               test -n "$edited_add_plan_out"
               printf "%s\n" "$edited_add_plan_out" > "$out_root/add-path-planner-output-edited.txt"
@@ -2424,7 +2651,7 @@ FLAGS
               fi
               printf "module A\ndecl: value :: Int\nbody: value = 1\ncomment: body edit %s\n" "$stamp" \
                 > "$scratch/tests/probes/ca-cutoff-toy/A.toy"
-              "$nix_bin" "''${nix_common[@]}" build "$scratch#penanceCaCutoffToy" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceCaCutoffToy" \
                 --no-link -L > "$out_root/logs/ca-toy-body-edit.log" 2>&1
               assert_built_count penance-ca-toy-A "$out_root/logs/ca-toy-body-edit.log" 1
               assert_built_count penance-ca-toy-B "$out_root/logs/ca-toy-body-edit.log" 0
@@ -2432,7 +2659,7 @@ FLAGS
               assert_built_count penance-ca-toy-link "$out_root/logs/ca-toy-body-edit.log" 1
               printf "module A\ndecl: value_%s :: Integer\nbody: value = 1\ncomment: declaration edit %s\n" "$stamp" "$stamp" \
                 > "$scratch/tests/probes/ca-cutoff-toy/A.toy"
-              "$nix_bin" "''${nix_common[@]}" build "$scratch#penanceCaCutoffToy" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceCaCutoffToy" \
                 --no-link -L > "$out_root/logs/ca-toy-declaration-edit.log" 2>&1
               assert_built_count penance-ca-toy-A "$out_root/logs/ca-toy-declaration-edit.log" 1
               assert_built_count penance-ca-toy-B "$out_root/logs/ca-toy-declaration-edit.log" 1
@@ -2440,9 +2667,9 @@ FLAGS
               assert_built_count penance-ca-toy-link "$out_root/logs/ca-toy-declaration-edit.log" 1
 
               cutoff_token="B5$(printf "%s" "$stamp" | tr -cd 'A-Za-z0-9')"
-              "$nix_bin" "''${nix_common[@]}" build "$scratch#penanceBenchViaLock" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceBenchViaLock" \
                 --no-link -L > "$out_root/logs/static-cutoff-baseline.log" 2>&1
-              "$nix_bin" "''${nix_common[@]}" build "$scratch#penanceBenchViaLock" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceBenchViaLock" \
                 --no-link -L > "$out_root/logs/static-cutoff-no-op.log" 2>&1
               if grep -q "building '" "$out_root/logs/static-cutoff-no-op.log"; then
                 echo "second static-unit cutoff build rebuilt derivations unexpectedly" >&2
@@ -2450,7 +2677,7 @@ FLAGS
               fi
               perl -0pi -e "s#    Users -> \"/users\"#    Users -> \"/people-$cutoff_token\"#" \
                 "$scratch/tests/bench/vs-haskell-nix/project/src/Bench/Route.hs"
-              body_out="$("$nix_bin" "''${nix_common[@]}" build "$scratch#penanceBenchViaLock" \
+              body_out="$("$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceBenchViaLock" \
                 --print-out-paths --no-link -L > "$out_root/logs/static-cutoff-body.stdout" 2> "$out_root/logs/static-cutoff-body.log" && tail -n 1 "$out_root/logs/static-cutoff-body.stdout")"
               test -n "$body_out"
               grep -q "/people-$cutoff_token" "$body_out/output.txt"
@@ -2464,7 +2691,7 @@ FLAGS
                 "$scratch/tests/bench/vs-haskell-nix/project/src/Bench/App.hs"
               printf '\nrunVersion%s :: String\nrunVersion%s = "%s"\n' "$cutoff_token" "$cutoff_token" "$cutoff_token" \
                 >> "$scratch/tests/bench/vs-haskell-nix/project/src/Bench/App.hs"
-              "$nix_bin" "''${nix_common[@]}" build "$scratch#penanceBenchViaLock" \
+              "$nix_bin" "''${nix_common[@]}" build "path:$scratch#penanceBenchViaLock" \
                 --no-link -L > "$out_root/logs/static-cutoff-export.log" 2>&1
               assert_built_count penance-penance-bench-lib "$out_root/logs/static-cutoff-export.log" 1
               assert_built_count penance-penance-bench-lib-dbIface "$out_root/logs/static-cutoff-export.log" 1
@@ -2472,7 +2699,7 @@ FLAGS
               assert_built_count penance-penance-bench-exe-penance-bench-compile "$out_root/logs/static-cutoff-export.log" 1
               assert_built_count penance-penance-bench-exe-penance-bench "$out_root/logs/static-cutoff-export.log" 1
 
-              if "$nix_bin" "''${nix_common[@]}" build "$flake_dir#penanceProbePlannerCorrupt" \
+              if "$nix_bin" "''${nix_common[@]}" build "path:$flake_dir#penanceProbePlannerCorrupt" \
                 --no-link -L > "$out_root/logs/corrupt-child-json.log" 2>&1; then
                 echo "corrupt child JSON unexpectedly succeeded" >&2
                 exit 1
@@ -2553,6 +2780,10 @@ FLAGS
           };
         in
         {
+          docs = {
+            type = "app";
+            program = "${serveDocs}/bin/penance-docs";
+          };
           # Total benchmark entrypoint. New benchmark suites should be wired here
           # so `nix run .#bench` remains the one command for complete coverage.
           bench = {
@@ -2595,9 +2826,9 @@ FLAGS
             type = "app";
             program = "${validateHackagePackage}/bin/validate-hackage-package";
           };
-          penance-lock = {
+          repent = {
             type = "app";
-            program = "${self.packages.${system}.plannerBin}/bin/penance-lock";
+            program = "${self.packages.${system}.repent}/bin/repent";
           };
         });
 

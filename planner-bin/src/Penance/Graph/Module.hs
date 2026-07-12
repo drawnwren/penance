@@ -6,15 +6,20 @@ where
 
 import qualified Penance.Json as Json
 import Penance.Json (array, object, string)
-import Penance.Plan
+import Penance.Skeleton
   ( LocalComponent (..)
   , LocalPackage (..)
   , ProjectSkeleton (..)
-  , drvFileFor
-  , skeletonPath
-  , writeJsonFile
   )
-import System.Directory (copyFile, createDirectoryIfMissing)
+import Penance.Plan (drvFileFor, writeJsonFile)
+import Penance.Types
+  ( PlanArtifactKind (..)
+  , PlanStatus (..)
+  , renderGranularity
+  , renderPlanArtifactKind
+  , renderPlanStatus
+  )
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
 data ModuleEntry = ModuleEntry
@@ -36,7 +41,6 @@ emitBootstrap :: ProjectSkeleton -> FilePath -> IO ()
 emitBootstrap skeleton out = do
   let dir = out </> "modules"
   createDirectoryIfMissing True dir
-  copyFile (skeletonPath skeleton) (dir </> "module-graph.bootstrap.json")
   writeJsonFile (dir </> "module-graph.json") (moduleGraphJson skeleton)
   mapM_ (writeModulePlan out) (moduleEntries skeleton)
 
@@ -60,11 +64,11 @@ moduleEntries skeleton =
 moduleGraphJson :: ProjectSkeleton -> Json.Json
 moduleGraphJson skeleton =
   object
-    [ ("kind", string "moduleGraph")
-    , ("status", string "planned")
+    [ ("kind", string (renderPlanArtifactKind ModuleGraphArtifact))
+    , ("status", string (renderPlanStatus Planned))
     , ("projectKey", string (projectKey skeleton))
     , ("planCacheKey", string (planCacheKey skeleton))
-    , ("granularity", string (granularity skeleton))
+    , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("modules", array (map moduleEntryJson (moduleEntries skeleton)))
     ]
 
@@ -85,8 +89,8 @@ writeModulePlan out entry = do
   writeJsonFile
     (out </> entryPath entry)
     ( object
-        [ ("kind", string "moduleDrv")
-        , ("status", string "planned")
+        [ ("kind", string (renderPlanArtifactKind ModuleDrvArtifact))
+        , ("status", string (renderPlanStatus Planned))
         , ("package", string (entryPackage entry))
         , ("component", string (entryComponent entry))
         , ("module", string (entryModule entry))

@@ -90,7 +90,7 @@ nix run .#bench-haskell-nix-baseline -- --keep-going
 
 This separate matrix lives in
 `tests/architecture/haskell-nix-baseline-matrix.json`. It tracks the advertised
-haskell.nix baseline that remains in scope for STRATA: Cabal project
+haskell.nix baseline that remains in scope for Penance: Cabal project
 translation, component derivations, Hackage and Stackage package sets,
 `shellFor` and GHC shell helpers, project cross compilation, project variants
 and overrides, test/benchmark/check collection, and materialization/cache
@@ -194,8 +194,8 @@ output, and confirms both intentionally corrupt child JSON and a corrupted
 | Phase | State | Penance target | haskell.nix target | Meaning today |
 |---|---|---|---|---|
 | M0 primitives | `comparison` | `penancePrimitiveProbes` | `haskellNixPrimitiveProbes` | committed Nix primitive probes and derivation show/add round-trips |
-| M1 lock | `comparison` | `penanceLockBench` | `haskellNixBenchPlan` | committed benchmark and StateVar external-dependency `strata.lock` checks versus haskell.nix generated plan output |
-| M2 static simple | `comparison` | `penanceSimpleLibViaLock` | `haskellNixSimpleLib` | lock-built `simple-lib` component from `penanceProject`, with content-addressed ABI-stub `iface`, real object/archive `out`, and composed package DB outputs |
+| M1 lock | `comparison` | `repentBench` | `haskellNixBenchPlan` | committed benchmark and StateVar external-dependency `penance.lock` checks versus haskell.nix generated plan output |
+| M2 static simple | `comparison` | `penanceSimpleLibViaLock` | `haskellNixSimpleLib` | lock-built `simple-lib` component from `penanceProject`, with GHC-Wasm-canonicalized `iface`, real object/archive `out`, and composed package DB outputs |
 | M2 static bench | `comparison` | `penanceBenchViaLock` | `haskellNixBenchExe` | lock-built benchmark executable from `penanceProject`, compiling against `dbIface`, linking against `dbFull`, and smoke-testing generated output |
 | M4 module bench | `comparison` | `penanceBenchDyndrv` | `haskellNixBenchExe` | content-addressed recursive-Nix planner emitting per-module dynamic derivations plus final assembly; exact rebuild cutoff is enforced by M4 rebuild-scenarios rows |
 | M5 Backpack | `comparison` | `penanceBackpackReal` | `haskellNixBackpackExe` | real Backpack build with two concrete instantiations |
@@ -225,8 +225,14 @@ M0 primitives:
 M2 static unit cutoff:
 
 - lock-backed local libraries have split content-addressed `iface` and `out`
-  outputs; `iface` is compiled from body-erased ABI stubs because raw GHC
-  interfaces carry a changing source hash even with pragma omission flags
+  outputs; `iface` is produced by deserializing the real native GHC interface
+  with GHC-Wasm, replacing its source hash with GHC's ABI hash, deriving a
+  dependency-aware interface hash, and serializing it with its producer header
+  intact; planner-owned staged object usage records are excluded for TH edges
+- `penanceIfaceCanonicalizerProof` asserts deterministic output, body-edit
+  convergence, API-edit divergence, primed and unsigned export preservation,
+  dependency-key propagation and ordering, native consumer compilation, and
+  wrong-version rejection for producer GHC 9.10.2 and 9.10.3 interfaces
 - composed `dbIface` and `dbFull` package DB derivations drive executable
   compile and link steps separately
 - dynamic-probes records a no-op build, an implementation-body edit that
@@ -235,13 +241,13 @@ M2 static unit cutoff:
 
 M1 lock:
 
-- canonical `strata.lock` golden test for the benchmark fixture
+- canonical `penance.lock` golden test for the benchmark fixture
 - schema-1 external unit metadata for the StateVar fixture, including the
   Hackage sdist hash and GHC boot-library markers
 - deterministic repeated lock generation for the external fixture
 - stale-lock rejection when the fixture dependency set changes
 - explicit `project.pathBase = "project-root"` metadata for lock-local paths
-- `penance-lock --check` wired into `penanceLockBench`
+- `repent --check` wired into `repentBench`
 - haskell.nix `plan-nix` materialization wired into `haskellNixBenchPlan`
 - Backpack unit ID and substitution fixture
 - per-target flag divergence fixture

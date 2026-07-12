@@ -4,12 +4,12 @@ module Penance.Dyndrv
 where
 
 import Control.Monad (foldM)
-import Data.Char (isAlphaNum, isLower, isSpace)
-import Data.List (intercalate, isPrefixOf, isSuffixOf, sort, sortOn)
+import Data.List (intercalate, isSuffixOf, sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Penance.Json (Json (..), array, object, renderJson, string)
 import qualified Penance.Json as Json
+import Penance.Types (PackageDbKind (..), parsePackageDbKind)
 import System.Directory (removeFile)
 import System.Exit (ExitCode (..), die)
 import System.FilePath ((</>), takeFileName)
@@ -55,7 +55,7 @@ data RequiredOptions = RequiredOptions
 data PlannedModule = PlannedModule
   { pmSource :: FilePath
   , pmDeps :: [FilePath]
-  , pmDb :: String
+  , pmDb :: PackageDbKind
   , pmIsBoot :: Bool
   }
   deriving (Eq, Show)
@@ -79,7 +79,7 @@ emitBenchDyndrvFromArgs args = do
         Set.fromList
           [ dep
           | modulePlan <- modules
-          , pmDb modulePlan == "dbFull"
+          , pmDb modulePlan == FullPackageDb
           , dep <- pmDeps modulePlan
           ]
   built <- foldM (emitModule options flags dependencySet dynamicObjectSet) Map.empty modules
@@ -179,7 +179,8 @@ decodeModule value = do
   fields <- asObject "module" value
   source <- field "source" fields >>= asString "module.source"
   deps <- field "deps" fields >>= stringArray "module.deps"
-  db <- field "db" fields >>= asString "module.db"
+  dbText <- field "db" fields >>= asString "module.db"
+  db <- parsePackageDbKind dbText
   pure
     PlannedModule
       { pmSource = source
@@ -194,7 +195,7 @@ emitModule options flags dependencySet dynamicObjectSet built modulePlan = do
       moduleName = sanitizeName (pmSource modulePlan)
       ifaceName = "penance-dyndrv-iface-" ++ moduleName
       objectName = "penance-dyndrv-module-" ++ moduleName
-      needsFull = pmDb modulePlan == "dbFull"
+      needsFull = pmDb modulePlan == FullPackageDb
       needsIface = pmSource modulePlan `Set.member` dependencySet
       needsDynamicObject = needsFull || pmSource modulePlan `Set.member` dynamicObjectSet
   addedObjectSource <- runNix options ["store", "add-path", sourcePath]
@@ -202,7 +203,7 @@ emitModule options flags dependencySet dynamicObjectSet built modulePlan = do
   let depHiPlaceholders = map bmHiPlaceholder depModules
       objectDepModules = filter (not . bmIsBoot) depModules
       depOPlaceholders = if needsFull then map bmOPlaceholder objectDepModules else []
-      ifaceInputs =
+      bootIfaceInputs =
         mergeInputs
           (toolInputs options ++ [(bmHiDrv dep, ["hi"]) | dep <- depModules])
       objectInputs =
@@ -239,7 +240,7 @@ emitModule options flags dependencySet dynamicObjectSet built modulePlan = do
                   , ("src", addedObjectSource)
                   ]
               )
-              ifaceInputs
+              bootIfaceInputs
               [takeFileName addedObjectSource]
               (caOutputs ["hi"])
       hiDrv <- addDerivation options ifaceJson
@@ -257,32 +258,37 @@ emitModule options flags dependencySet dynamicObjectSet built modulePlan = do
             built
         )
     else do
-      (hiDrv, hiPlaceholder) <-
-        if needsIface
-      then do
-        sourceContents <- readFile sourcePath
-        let ifaceSource = abiStubSource sourceContents
-            ifaceJson =
-              derivationJson
-                ifaceName
-                (reqSystem options)
-                (reqBuilder options)
-                (ifaceArgs options flags modulePlan ifaceSource depHiPlaceholders)
-                ( moduleEnv
-                    options
-                    ifaceName
-                    [ ("hi", reqPlaceholderHi options)
-                    ]
-                )
-                ifaceInputs
-                []
-                (caOutputs ["hi"])
-        drv <- addDerivation options ifaceJson
-        placeholder <- downstreamPlaceholder options drv "hi"
-        pure (drv, placeholder)
-      else pure ("", "")
       oDrv <- addDerivation options objectJson
       oPlaceholder <- downstreamPlaceholder options oDrv "o"
+      (hiDrv, hiPlaceholder) <-
+        if needsIface
+          then do
+            let ifaceInputs =
+                  mergeInputs
+                    ( toolInputs options
+                        ++ [(oDrv, ["o"])]
+                        ++ [(bmHiDrv dep, ["hi"]) | dep <- depModules]
+                    )
+                ifaceJson =
+                  derivationJson
+                    ifaceName
+                    (reqSystem options)
+                    (reqBuilder options)
+                    (ifaceArgs options depHiPlaceholders)
+                    ( moduleEnv
+                        options
+                        ifaceName
+                        [ ("hi", reqPlaceholderHi options)
+                        , ("real_o", oPlaceholder)
+                        ]
+                    )
+                    ifaceInputs
+                    []
+                    (caOutputs ["hi"])
+            drv <- addDerivation options ifaceJson
+            placeholder <- downstreamPlaceholder options drv "hi"
+            pure (drv, placeholder)
+          else pure ("", "")
       pure
         ( Map.insert
             (pmSource modulePlan)
@@ -329,31 +335,23 @@ sortOnDrv :: [BuiltModule] -> [BuiltModule]
 sortOnDrv =
   sortByKey bmODrv
 
-ifaceArgs :: RequiredOptions -> [String] -> PlannedModule -> String -> [String] -> [String]
-ifaceArgs options flags _modulePlan ifaceSource depHiPlaceholders =
+ifaceArgs :: RequiredOptions -> [String] -> [String]
+ifaceArgs options depHiPlaceholders =
   [ "-euc"
   , unlines
       [ "set -euo pipefail"
       , "export PATH=" ++ shellQuote (reqPath options)
-      , bashArray "base_ghc_flags" flags
-      , bashArray "dep_hi_dirs" depHiPlaceholders
-      , "cat > \"$TMPDIR/iface-stub.hs\" <<'PENANCE_IFACE_STUB'"
-      , ifaceSource
-      , "PENANCE_IFACE_STUB"
-      , "mkdir -p \"$hi\" iface-build"
-      , "iface_flags=(\"${base_ghc_flags[@]}\" -odir iface-build -hidir iface-build -outputdir iface-build)"
-      , "for dep_hi in \"${dep_hi_dirs[@]}\"; do"
-      , "  cp -R \"$dep_hi\"/. iface-build/"
-      , "  chmod -R u+w iface-build"
-      , "  iface_flags+=(\"-i$dep_hi\")"
-      , "done"
-      , "chmod -R u+w iface-build"
-      , "ghc \"${iface_flags[@]}\" -c \"$TMPDIR/iface-stub.hs\""
+      , "compiler_version=$(ghc --numeric-version)"
+      , "iface_version=$(printf '%s' \"$compiler_version\" | tr -d .)"
+      , "case \"$iface_version\" in ''|*[!0-9]*) echo \"penance-dyndrv: cannot derive interface version from GHC $compiler_version\" >&2; exit 1;; esac"
+      , "mkdir -p \"$hi\""
       , "while IFS= read -r artifact; do"
-      , "  rel=\"${artifact#iface-build/}\""
+      , "  rel=\"${artifact#$real_o/}\""
       , "  mkdir -p \"$hi/$(dirname \"$rel\")\""
-      , "  cp \"$artifact\" \"$hi/$rel\""
-      , "done < <(find iface-build \\( -name '*.hi' -o -name '*.dyn_hi' \\) -type f | sort)"
+      , "  penance-iface-canon --input \"$artifact\" --output \"$hi/$rel\" --expect-version \"$iface_version\""
+          ++ " --drop-dependent-file-prefix object-build/"
+          ++ concatMap (\path -> " --dependency-interface " ++ shellQuote path) depHiPlaceholders
+      , "done < <(find \"$real_o\" -name '*.hi' -type f | sort)"
       , "test -n \"$(find \"$hi\" -name '*.hi' -type f -print -quit)\""
       ]
   ]
@@ -416,59 +414,13 @@ objectArgs options flags modulePlan needsDynamicObject addedSource depHiPlacehol
       , "  rel=\"${artifact#object-build/}\""
       , "  mkdir -p \"$o/$(dirname \"$rel\")\""
       , "  cp \"$artifact\" \"$o/$rel\""
-      , "done < <(comm -13 \"$TMPDIR/staged-artifacts\" <(find object-build \\( -name '*.o' -o -name '*.dyn_o' -o -name '*.dyn_hi' \\) -type f | sort))"
+      , "done < <(comm -13 \"$TMPDIR/staged-artifacts\" <(find object-build \\( -name '*.o' -o -name '*.hi' -o -name '*.dyn_o' -o -name '*.dyn_hi' \\) -type f | sort))"
       , "test -n \"$(find \"$o\" -name '*.o' -type f -print -quit)\""
       , "echo " ++ shellQuote ("compiled penance-dyndrv-module " ++ pmSource modulePlan) ++ " >&2"
       ]
   ]
   where
     _ = addedSource
-
-abiStubSource :: String -> String
-abiStubSource =
-  unlines . go Nothing . lines
-  where
-    go _ [] = []
-    go pending (line : rest)
-      | Just name <- pending
-      , shouldSkipBodyLine name line =
-          go pending rest
-      | Just name <- signatureName line =
-          line : (name ++ " = error \"penance iface stub\"") : go (Just name) rest
-      | otherwise =
-          line : go Nothing rest
-
-shouldSkipBodyLine :: String -> String -> Bool
-shouldSkipBodyLine name line =
-  all isSpace line
-    || beginsWithSpace line
-    || beginsWithName name line
-
-beginsWithSpace :: String -> Bool
-beginsWithSpace [] = False
-beginsWithSpace (ch : _) = isSpace ch
-
-beginsWithName :: String -> String -> Bool
-beginsWithName name line =
-  name `isPrefixOf` line
-    && case drop (length name) line of
-      [] -> True
-      ch : _ -> not (isIdentifierChar ch)
-
-signatureName :: String -> Maybe String
-signatureName line =
-  case line of
-    ch : _
-      | isLower ch || ch == '_' ->
-          let (name, rest) = span isIdentifierChar line
-           in if "::" `isPrefixOf` dropWhile isSpace rest
-                then Just name
-                else Nothing
-    _ -> Nothing
-
-isIdentifierChar :: Char -> Bool
-isIdentifierChar ch =
-  isAlphaNum ch || ch == '_' || ch == '\''
 
 assembleArgs :: RequiredOptions -> [String] -> [String] -> [String]
 assembleArgs options flags moduleOPlaceholders =

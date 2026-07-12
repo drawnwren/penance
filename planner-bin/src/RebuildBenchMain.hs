@@ -10,6 +10,20 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Penance.Json (Json (..), parseJson, renderJson)
 import qualified Penance.Json as Json
+import Penance.Types
+  ( BenchmarkAction (..)
+  , BenchmarkBackend (..)
+  , BenchmarkStatus (..)
+  , PenanceSchema (..)
+  , PhaseStatus (..)
+  , benchmarkStatusSucceeded
+  , parsePhaseStatus
+  , renderBenchmarkAction
+  , renderBenchmarkBackend
+  , renderBenchmarkStatus
+  , renderPhaseStatus
+  , renderPenanceSchema
+  )
 import System.Directory
   ( canonicalizePath
   , copyFile
@@ -48,7 +62,7 @@ data Scenario = Scenario
   { scenarioId :: String
   , scenarioMilestone :: String
   , scenarioTitle :: String
-  , scenarioStatus :: String
+  , scenarioStatus :: PhaseStatus
   , scenarioMode :: RebuildMode
   , scenarioAttr :: String
   , scenarioFixture :: FilePath
@@ -80,10 +94,10 @@ data Row = Row
   , rowPhaseId :: String
   , rowMilestone :: String
   , rowPhaseTitle :: String
-  , rowBackend :: String
+  , rowBackend :: BenchmarkBackend
   , rowAttr :: Maybe String
-  , rowAction :: String
-  , rowStatus :: String
+  , rowAction :: BenchmarkAction
+  , rowStatus :: BenchmarkStatus
   , rowSupported :: Bool
   , rowWallMs :: Integer
   , rowDrvPath :: Maybe FilePath
@@ -198,7 +212,7 @@ readScenarios path = do
   value <- either die pure (parseJson contents)
   fields <- expectObject "rebuild scenarios" value
   schema <- stringField "schema" fields
-  unless (schema == "penance/rebuild-scenarios/1") $
+  unless (schema == renderPenanceSchema RebuildScenariosSchemaV1) $
     die ("unexpected rebuild scenario schema: " ++ schema)
   scenarioValues <- arrayField "scenarios" fields
   traverse decodeScenario scenarioValues
@@ -208,10 +222,12 @@ decodeScenario value = do
   fields <- expectObject "scenario" value
   scenarioIdValue <- stringField "id" fields
   mode <- decodeRebuildMode =<< optionalStringField "mode" fields
+  statusText <- stringField "status" fields
+  status <- either die pure (parsePhaseStatus statusText)
   Scenario scenarioIdValue
     <$> stringField "milestone" fields
     <*> stringField "title" fields
-    <*> stringField "status" fields
+    <*> pure status
     <*> pure mode
     <*> stringField "attr" fields
     <*> stringField "fixture" fields
@@ -248,7 +264,7 @@ printScenarioList :: [Scenario] -> IO ()
 printScenarioList scenarios = do
   let widths =
         [ maxTextWidth 34 (map scenarioId scenarios)
-        , maxTextWidth 10 (map scenarioStatus scenarios)
+        , maxTextWidth 10 (map (renderPhaseStatus . scenarioStatus) scenarios)
         , maxTextWidth 30 (map scenarioAttr scenarios)
         , maxTextWidth 8 (map (maybe "-" show . scenarioExpectedMax) scenarios)
         ]
@@ -259,7 +275,7 @@ printScenarioList scenarios = do
       formatColumns
         widths
         [ scenarioId scenario
-        , scenarioStatus scenario
+        , renderPhaseStatus (scenarioStatus scenario)
         , scenarioAttr scenario
         , maybe "-" show (scenarioExpectedMax scenario)
         ]
@@ -423,18 +439,18 @@ runScenario options system logDir scenario = do
                   )
               _ -> Nothing
           statusFailure =
-            if scenarioStatus scenario == "failing"
+            if scenarioStatus scenario == FailingPhase
               then Just (fromMaybe "Required rebuild scenario does not have an enforced bound yet" (scenarioFailure scenario))
               else Nothing
           editFailure =
             baselineSaltResult <|> editResult
-          statusText =
+          benchmarkStatus =
             case commandStatus <|> editFailure <|> boundStatus <|> exactStatus <|> statusFailure of
-              Nothing -> "0"
+              Nothing -> BenchmarkSucceeded
               Just message ->
-                if scenarioStatus scenario == "failing" && commandStatus == Nothing && editFailure == Nothing && boundStatus == Nothing && exactStatus == Nothing
-                  then "not_implemented"
-                  else message
+                if scenarioStatus scenario == FailingPhase && commandStatus == Nothing && editFailure == Nothing && boundStatus == Nothing && exactStatus == Nothing
+                  then BenchmarkNotImplemented
+                  else BenchmarkFailed message
           drvPath = nonEmptyMaybe (strip (crStdout editedEval))
           logText =
             intercalate ", " $
@@ -466,13 +482,13 @@ runScenario options system logDir scenario = do
               , rowPhaseId = scenarioId scenario
               , rowMilestone = scenarioMilestone scenario
               , rowPhaseTitle = scenarioTitle scenario
-              , rowBackend = "penance"
+              , rowBackend = PenanceBackend
               , rowAttr = Just (scenarioAttr scenario)
               , rowAction =
                   case scenarioMode scenario of
-                    DryRunDiff -> "rebuild_dry_run"
-                    DyndrvBuildLog -> "dyndrv_build_log"
-              , rowStatus = statusText
+                    DryRunDiff -> RebuildDryRunAction
+                    DyndrvBuildLog -> DyndrvBuildLogAction
+              , rowStatus = benchmarkStatus
               , rowSupported = commandStatus == Nothing && editFailure == Nothing
               , rowWallMs = overallEnd - overallStart
               , rowDrvPath = drvPath
@@ -527,7 +543,6 @@ skipCopyPath path =
     -- Gitignored build outputs; without .git the worktree is a path flake,
     -- so anything copied here is also re-hashed into the store per nix call.
     -- dist-newstyle appears at any depth (fixture projects build in-tree).
-    || path == "wasm-planner/target"
     || takeFileNameSimple path == "dist-newstyle"
     || takeFileNameSimple path == ".direnv"
     || takeFileNameSimple path == "result"
@@ -759,7 +774,7 @@ editDescription (ReplaceEdit file _ _) = "replace in " ++ file
 summaryJsonValue :: String -> String -> Options -> Int -> [Row] -> Json
 summaryJsonValue stamp system options failures rows =
   Json.object
-    [ ("schema", Json.string "penance/rebuild-bench/1")
+    [ ("schema", Json.string (renderPenanceSchema RebuildBenchSchemaV1))
     , ("created", Json.string stamp)
     , ("system", Json.string system)
     , ("flake", Json.string (optFlake options))
@@ -782,10 +797,10 @@ rowJson row =
     , ("phaseId", Json.string (rowPhaseId row))
     , ("milestone", Json.string (rowMilestone row))
     , ("phaseTitle", Json.string (rowPhaseTitle row))
-    , ("backend", Json.string (rowBackend row))
+    , ("backend", Json.string (renderBenchmarkBackend (rowBackend row)))
     , ("attr", maybe Json.JsonNull Json.string (rowAttr row))
-    , ("action", Json.string (rowAction row))
-    , ("status", Json.string (rowStatus row))
+    , ("action", Json.string (renderBenchmarkAction (rowAction row)))
+    , ("status", Json.string (renderBenchmarkStatus (rowStatus row)))
     , ("supported", Json.bool (rowSupported row))
     , ("wallMs", jsonNumber (rowWallMs row))
     , ("drvPath", maybe Json.JsonNull Json.string (rowDrvPath row))
@@ -836,7 +851,7 @@ renderHumanSummary system options failures rows =
                 "  - "
                   ++ rowPhaseId row
                   ++ " ["
-                  ++ rowStatus row
+                  ++ renderBenchmarkStatus (rowStatus row)
                   ++ "]: "
                   ++ fromMaybe "see logs" (rowCommand row)
             )
@@ -850,7 +865,7 @@ renderMeasurement row =
     ++ formatColumns
       [33, 16, 7, 8]
       [ rowPhaseId row
-      , rowStatus row
+      , renderBenchmarkStatus (rowStatus row)
       , show (rowRebuiltDrvCount row)
       , renderSeconds (rowWallMs row)
       ]
@@ -863,10 +878,10 @@ renderTsvRow row =
     , rowPhaseId row
     , rowMilestone row
     , rowPhaseTitle row
-    , rowBackend row
+    , renderBenchmarkBackend (rowBackend row)
     , fromMaybe "" (rowAttr row)
-    , rowAction row
-    , rowStatus row
+    , renderBenchmarkAction (rowAction row)
+    , renderBenchmarkStatus (rowStatus row)
     , if rowSupported row then "1" else "0"
     , show (rowWallMs row)
     , fromMaybe "" (rowDrvPath row)
@@ -905,11 +920,11 @@ tsvHeader =
 
 rowIsFailure :: Row -> Bool
 rowIsFailure row =
-  rowStatus row /= "0"
+  not (benchmarkStatusSucceeded (rowStatus row))
 
 rowIsAllowedFailure :: Options -> Row -> Bool
 rowIsAllowedFailure options row =
-  optAllowNotImplemented options && rowStatus row == "not_implemented"
+  optAllowNotImplemented options && rowStatus row == BenchmarkNotImplemented
 
 rowIsEffectiveFailure :: Options -> Row -> Bool
 rowIsEffectiveFailure options row =

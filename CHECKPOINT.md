@@ -5,34 +5,34 @@
 - Re-read `PROGRESS.md` from the current worktree. The active plan is not the
   earlier parity cleanup; it requires Arc A (lock-driven unit MVP) before Arc
   B's post-MVP module granularity work.
-- Current evidence for A1: `planner-bin/src/LockMain.hs` still emits
-  `schema = "penance/strata-lock/0"` and stores component dependency ranges
+- Current evidence for A1: `planner-bin/src/RepentMain.hs` still emits
+  `schema = "penance/lock/0"` and stores component dependency ranges
   only. There is no `tests/fixtures/lock-external/` fixture yet, so A1 is the
   first unmet sequencing gate.
 - Current action: implement A1 without weakening the existing test/matrix
-  gates. The lock must become deterministic schema `penance/strata-lock/1`,
+  gates. The lock must become deterministic schema `penance/lock/1`,
   include solved external units with exact versions and source metadata, add
   a StateVar fixture with a committed golden lock, migrate the benchmark
-  fixture lock, and keep `penance-lock --check` freshness meaningful.
+  fixture lock, and keep `repent --check` freshness meaningful.
 - A1 implementation pass:
-  - `penance-lock` now emits `schema = "penance/strata-lock/1"` and an
+  - `repent` now emits `schema = "penance/lock/1"` and an
     `externalUnits` section. Boot packages used by the fixtures are marked
     `source = "ghc-boot"` with compiler-specific versions; StateVar is pinned
     to version `1.2.2` with its Hackage tarball URL and SRI sha256.
   - Added `tests/fixtures/lock-external/`, an executable fixture depending on
-    `StateVar`, plus its generated golden `strata.lock`.
-  - Migrated `tests/bench/vs-haskell-nix/project/strata.lock` to schema 1.
-  - `penanceLockBench` now checks both committed locks, compares two generated
+    `StateVar`, plus its generated golden `penance.lock`.
+  - Migrated `tests/bench/vs-haskell-nix/project/penance.lock` to schema 1.
+  - `repentBench` now checks both committed locks, compares two generated
     external-fixture locks byte-for-byte, asserts the StateVar sdist and base
     ghc-boot metadata with `jq`, and verifies a scratch dependency edit fails
-    `penance-lock --check`.
-  - Exposed `nix run .#penance-lock` for the plan's documented command line.
+    `repent --check`.
+  - Exposed `nix run .#repent` for the plan's documented command line.
 - A1 verification:
   - `nix build .#plannerBin --no-link -L` passed.
   - Direct determinism/JQ check for the external fixture passed.
   - Direct stale-lock negative check failed as expected with
-    `penance-lock: lock is stale`.
-  - `nix build .#penanceLockBench --no-link -L` passed.
+    `repent: lock is stale`.
+  - `nix build .#repentBench --no-link -L` passed.
   - Static checks passed:
     `architecture-suite-static`, `architecture-functionality-static`,
     `haskell-nix-baseline-static`, and `nix-format`.
@@ -45,7 +45,7 @@
   derivations only; component attrs do not yet compile Haskell units from the
   committed lock.
 - A2 implementation pass:
-  - `nix/lib.nix` now uses schema-1 `strata.lock` for component-mode projects
+  - `nix/lib.nix` now uses schema-1 `penance.lock` for component-mode projects
     that have a committed lock. It reads the lock with `builtins.fromJSON`,
     builds Hackage `StateVar` from the lock-pinned `fetchurl` tarball, asserts
     the built version against the lock, builds local library package DBs, and
@@ -54,7 +54,7 @@
     `penanceBenchLibViaLock`, `penanceBenchViaLock`,
     `penanceBenchTestViaLock`, `penanceBenchBenchmarkViaLock`,
     `penanceLockExternalViaLock`, and `penanceSimpleLibViaLock`.
-  - Added `tests/fixtures/simple-lib/strata.lock` so the simple fixture also
+  - Added `tests/fixtures/simple-lib/penance.lock` so the simple fixture also
     exercises the lock path.
   - Verification: all benchmark components and the lock-external executable
     build through `penanceProject`; `penanceBenchViaLock/output.txt` byte-matches
@@ -67,7 +67,7 @@
   - The old raw `penanceBenchReal`, `penanceSimpleLibReal`, and
     `mkPenanceBenchExecutable` non-module branch were removed. The remaining
     raw GHC bench path is `penanceModuleGranularBench`, the Arc B seed, and its
-    package flags are derived from `strata.lock`.
+    package flags are derived from `penance.lock`.
   - `penanceBenchChecks`, primitive probes, MSC, warp, lock-cache manifest,
     project variants, haskell.nix component baseline, and rebuild scenarios now
     use the lock-built benchmark executable or lock-built test/benchmark
@@ -79,8 +79,8 @@
 - A4 implementation pass:
   - `penanceProject` now exposes `devShells.default` for lock-backed component
     projects. The top-level `devShells.default` consumes the benchmark project's
-    lock-derived shell with `inputsFrom` while retaining the Rust toolchain and
-    Nix CLI.
+    lock-derived shell with `inputsFrom`; the later planner migration replaced
+    the former planner toolchain with pinned GHC-Wasm alongside the Nix CLI.
   - The shell package list is derived from the benchmark lock rather than a
     hand-maintained list.
   - Verification: `nix build .#penanceBenchDevShell .#penanceBenchShell
@@ -138,10 +138,10 @@
     every implemented row; M1-lock was `0.86s` vs `0.99s`.
 - B5 implementation pass:
   - The lock-backed A2 unit builder now builds local libraries as
-    content-addressed split outputs: `iface` from body-erased ABI stubs and
-    `out` from the real source objects/archive. The ABI-stub step is necessary
-    because raw GHC `.hi` files still include a changing `src_hash` even with
-    `-fomit-interface-pragmas` and related dev flags.
+    content-addressed split outputs: `iface` from real interfaces rewritten by
+    the shared GHC-Wasm canonicalizer and `out` from the real source
+    objects/archive. Canonicalization removes the changing source hash while
+    preserving GHC's ABI and dependency-interface propagation.
   - Local libraries expose composed `dbIface` and `dbFull` package DB
     derivations. Executable/test/benchmark components compile in a separate
     CA derivation against `dbIface` and link/run in a CA derivation against
@@ -186,14 +186,14 @@
   - Created a throwaway clone, applied the current tree state, committed it in
     the temp repo, and verified `git status --short` was empty before running
     acceptance commands.
-  - Initial sweep exposed that the `penance-lock` CLI default emitted
+  - Initial sweep exposed that the `repent` CLI default emitted
     `indexState = "unknown"` and the lock-external golden had been generated
     for `ghc-9.10.3`. Fixed the implementation/golden mismatch by defaulting
     to the pinned index state and regenerating the lock-external fixture for
     the `ghc-9.10.2` package set used by the lock-backed builder.
   - Clean snapshot lock/eval checks passed:
-    regenerated `tests/fixtures/lock-external/strata.lock` and
-    `tests/bench/vs-haskell-nix/project/strata.lock` byte-matched the committed
+    regenerated `tests/fixtures/lock-external/penance.lock` and
+    `tests/bench/vs-haskell-nix/project/penance.lock` byte-matched the committed
     locks, and no-IFD drvPath eval passed for
     `penanceLockExternalViaLock`, `penanceBenchViaLock`,
     `penanceBenchTestViaLock`, and `penanceBenchBenchmarkViaLock`.
@@ -272,7 +272,7 @@
     `haskell-nix-baseline-static`.
 - B7 planner implementation slice:
   - Added `penance-plan module-plan`, which consumes the real `ghc -M`
-    makefile plus the committed `strata.lock` and emits a deterministic
+    makefile plus the committed `penance.lock` and emits a deterministic
     module plan JSON artifact.
   - The plan is backed by the same `Penance.GhcMakefile` parser as
     `module-order`, so line continuations, aggregated object rules, `.hi`
@@ -371,13 +371,13 @@
     work starts at B8: the thirty-module cutoff fixture and exact rebuild-set
     assertions.
 - B8 cutoff foundation:
-  - Changed the dynamic module builder so each module derivation now compiles
-    real source for its `o` output and a body-erased ABI stub for its `hi`
-    output, mirroring the unit builder's cutoff strategy. `dbFull` modules also
-    produce dynamic stub interfaces so Template Haskell dependents can load
-    real dynamic objects while typechecking against stable ABI data.
-  - Added `perl` to the emitted dynamic derivation tool path and input drv set
-    because the stubber now runs inside module derivations.
+  - Changed the dynamic module builder so each object derivation compiles real
+    source and retains its raw `.hi`; a separate derivation runs the shared
+    GHC-Wasm canonicalizer to produce the content-addressed `hi` output.
+    `dbFull` modules still provide real dynamic objects for Template Haskell
+    while normal importers consume canonical interface data.
+  - Added the GHC-Wasm canonicalizer and Wasmtime to the emitted derivation
+    tool closure. Perl is no longer part of interface production.
   - Regression checks passed after the split:
     `nix build .#penanceBenchDyndrv --no-link -L --print-out-paths` and
     `nix build .#penanceDyndrvEmissionProof --no-link -L --print-out-paths`.
@@ -397,14 +397,13 @@
     gap-row conversion.
 - B8 cutoff completion:
   - Reworked dyndrv emission so interface and object outputs are separate
-    child derivations. Interface derivations compile body-erased ABI stub
-    source, while object derivations compile real source and are the only
-    module derivations that emit `compiled penance-dyndrv-module ...`.
-    Dependents consume interface `hi` outputs, so body-only object edits no
-    longer churn downstream module identities.
+    child derivations. Object derivations compile real source and emit both
+    objects and raw interfaces; interface derivations run the GHC-Wasm
+    canonicalizer over those real interfaces. Dependents consume canonical
+    `hi` outputs, so body-only object edits converge before downstream module
+    compilation.
   - Leaf modules without downstream dependents skip interface derivation
-    emission, and interface stub source is embedded directly in the child
-    derivation script. The B7 proof stayed under its 2s planner bound:
+    emission. The B7 proof stayed under its 2s planner bound:
     `plannerMs = 1779`, `maxPlannerMs = 2000`, `moduleDrvs = 11`,
     `converged = true`, and `outputMatchesUnit = true`.
   - Extended `penance-rebuild-bench` with `dyndrv-build-log` mode. It builds
@@ -473,3 +472,22 @@
     architecture/haskell.nix sections reported `Speed failures: none`.
   - Arc B is complete as of this run; `PROGRESS.md` has no unchecked work
     items remaining.
+- GHC-Wasm backend migration:
+  - Removed the previous planner implementation and its toolchain inputs. The
+    shared normalizer is now Haskell in `planner-bin`, with a native CLI/test
+    target and a separate GHC `wasm32-wasi` command-module entry point.
+  - The flake pins `ghc-wasm-meta` 9.10, builds `.#ghcWasmPlanner`, runs
+    `wasm-opt -Oz`, and keeps evaluation on the committed `nix/planner.wasm`
+    artifact. Determinate Nix supplies the input value ID through `argv[1]` and
+    receives the result through `env.return_to_nix`.
+  - The Haskell output was byte-compared with the former normalizer for the
+    ordinary fixture, Backpack fixture, a 100-entry source manifest spanning
+    multiple BLAKE3 chunks, and escaped non-BMP Unicode input; all matched.
+  - Native self-tests cover BLAKE3 vectors and deterministic normalization.
+    `wasm-tools validate` passed, as did the simple, Backpack signatures,
+    Backpack multi-instance, graph-plan, architecture static, baseline static,
+    and Nix format checks.
+  - Full `nix run .#bench` passed at
+    `docs/bench-results/bench/aarch64-darwin-20260711T051607Z/summary.txt`.
+    All ten suites passed, and every speed-gated architecture and haskell.nix
+    section reported `Speed failures: none`.

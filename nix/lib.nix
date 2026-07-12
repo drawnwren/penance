@@ -2,6 +2,8 @@
 , pkgs
 , plannerWasm ? ./planner.wasm
 , penancePlanner ? null
+, ifaceCanonicalizer ? null
+, repent ? null
 }:
 
 let
@@ -12,24 +14,6 @@ let
   plannerDrv = import ./planner-drv.nix {
     inherit lib pkgs penancePlanner;
   };
-
-  ignoredSourceName = name:
-    name == ".direnv"
-    || name == ".git"
-    || name == "dist-newstyle"
-    || name == "target"
-    || name == "result"
-    || lib.hasPrefix "result-" name;
-
-  cleanSource = src:
-    lib.cleanSourceWith {
-      inherit src;
-      filter = path: type:
-        let
-          name = builtins.baseNameOf path;
-        in
-          !(ignoredSourceName name);
-    };
 
   sourceManifestFor = src:
     let
@@ -44,9 +28,7 @@ let
                 absPath = dir + "/${name}";
                 relPath = if prefix == "" then name else "${prefix}/${name}";
               in
-                if ignoredSourceName name then
-                  []
-                else if entryType == "directory" then
+                if entryType == "directory" then
                   walk relPath absPath
                 else if entryType == "regular" then
                   [{
@@ -64,16 +46,13 @@ let
     let
       dir = if packagePath == "." then src else src + "/${packagePath}";
       entries = builtins.readDir dir;
-      cabalNames = builtins.filter
+      cabalName = lib.findSingle
         (name: lib.hasSuffix ".cabal" name)
+        (throw "penanceProject: no .cabal file found in package path `${packagePath}`")
+        (throw "penanceProject: multiple .cabal files found in package path `${packagePath}`")
         (builtins.attrNames entries);
     in
-      if cabalNames == [] then
-        throw "penanceProject: no .cabal file found in package path `${packagePath}`"
-      else if builtins.length cabalNames > 1 then
-        throw "penanceProject: multiple .cabal files found in package path `${packagePath}`"
-      else
-        dir + "/${builtins.head cabalNames}";
+      dir + "/${cabalName}";
 
   stripProjectComment = line:
     builtins.head (lib.splitString "--" line);
@@ -94,26 +73,6 @@ let
     in
       builtins.filter (line: line.text != "") (map record lines);
 
-  collectIndentedProjectLines = records:
-    if records == [] then
-      []
-    else
-      let
-        line = builtins.head records;
-        rest = builtins.tail records;
-      in
-        if line.indented then [ line.text ] ++ collectIndentedProjectLines rest else [];
-
-  dropIndentedProjectLines = records:
-    if records == [] then
-      []
-    else
-      let
-        line = builtins.head records;
-        rest = builtins.tail records;
-      in
-        if line.indented then dropIndentedProjectLines rest else records;
-
   splitProjectPackageWords = value:
     lib.filter (part: part != "")
       (map
@@ -121,24 +80,27 @@ let
         (lib.splitString " " (lib.replaceStrings [ "\n" "\t" ] [ " " " " ] value)));
 
   collectProjectFieldPackages = field: records:
-    if records == [] then
-      []
-    else
-      let
-        line = builtins.head records;
-        rest = builtins.tail records;
-        prefix = "${field}:";
-      in
-        if !line.indented && lib.hasPrefix prefix line.text then
-          let
-            inline = lib.removePrefix prefix line.text;
-            continuation = collectIndentedProjectLines rest;
-            remaining = dropIndentedProjectLines rest;
-            value = lib.concatStringsSep "\n" ([ inline ] ++ continuation);
-          in
-            splitProjectPackageWords value ++ collectProjectFieldPackages field remaining
-        else
-          collectProjectFieldPackages field rest;
+    let
+      prefix = "${field}:";
+      result = builtins.foldl'
+        (state: line:
+          if !line.indented then {
+            collecting = lib.hasPrefix prefix line.text;
+            chunks =
+              if lib.hasPrefix prefix line.text then
+                [ (lib.removePrefix prefix line.text) ] ++ state.chunks
+              else
+                state.chunks;
+          } else if state.collecting then {
+            collecting = true;
+            chunks = [ line.text ] ++ state.chunks;
+          } else
+            state)
+        { collecting = false; chunks = []; }
+        records;
+    in
+      splitProjectPackageWords
+        (lib.concatStringsSep "\n" (lib.reverseList result.chunks));
 
   simpleProjectPackages = cabalProjectText:
     let
@@ -160,12 +122,16 @@ let
       (simpleProjectPackages cabalProjectText);
 
   compilerPackagesFor = compiler:
-    if compiler == "ghc-9.10.3" && pkgs.haskell.packages ? ghc9103 then
-      pkgs.haskell.packages.ghc9103
-    else if compiler == "ghc-9.10.2" && pkgs.haskell.packages ? ghc9102 then
-      pkgs.haskell.packages.ghc9102
-    else
-      pkgs.haskellPackages;
+    let
+      version = lib.removePrefix "ghc-" compiler;
+      packageAttr = "ghc${lib.replaceStrings [ "." ] [ "" ] version}";
+    in
+      if !lib.hasPrefix "ghc-" compiler || version == "" then
+        throw "penanceProject: malformed compiler identifier `${compiler}`"
+      else if builtins.hasAttr packageAttr pkgs.haskell.packages then
+        builtins.getAttr packageAttr pkgs.haskell.packages
+      else
+        throw "penanceProject: compiler `${compiler}` is unavailable as pkgs.haskell.packages.${packageAttr}";
 
   sanitizeName = value:
     lib.replaceStrings [ ":" "/" " " ] [ "-" "-" "-" ] value;
@@ -189,18 +155,20 @@ let
     in
       if noSuffix == "" then "." else noSuffix;
 
-  componentSourceFor = srcPath: pkg: component:
+  componentSourceProjection = srcPath: pkg: component:
     let
       pkgRoot = if pkg.path == "." then srcPath else srcPath + "/${pkg.path}";
       rootString = toString pkgRoot;
       sourceDirs = map normalizeSourceDir (component.sourceDirs or [ "." ]);
-      inSourceDir = rel: dir:
+      belongsToSourceDir = rel: dir:
         dir == "."
         || rel == dir
-        || lib.hasPrefix "${dir}/" rel;
+        || lib.hasPrefix "${dir}/" rel
+        || lib.hasPrefix "${rel}/" dir;
     in
-      lib.cleanSourceWith {
-        src = pkgRoot;
+      builtins.path {
+        path = pkgRoot;
+        name = "penance-${sanitizeName pkg.name}-${sanitizeName component.name}-source";
         filter = path: type:
           let
             pathString = toString path;
@@ -209,10 +177,9 @@ let
                 ""
               else
                 lib.removePrefix "${rootString}/" pathString;
-            name = builtins.baseNameOf path;
           in
             rel == ""
-            || (!ignoredSourceName name && builtins.any (inSourceDir rel) sourceDirs);
+            || builtins.any (belongsToSourceDir rel) sourceDirs;
       };
 
   shellArrayLines = values:
@@ -249,106 +216,159 @@ let
         in unit != null && unit.source == "hackage")
       dependencyNames;
 
-  buildExternalUnit = hpkgs: unit:
-    if unit.name != "StateVar" then
-      throw "penanceProject: unsupported hackage external unit `${unit.name}`"
-    else
-      let
-        unitId = "${unit.name}-${unit.version}";
-        srcTarball = pkgs.fetchurl {
-          inherit (unit.sdist) url;
-          hash = unit.sdist.sha256;
-        };
-      in
-        pkgs.runCommand "penance-external-${unitId}" {
-          nativeBuildInputs = [
-            hpkgs.ghc
-            pkgs.findutils
-            pkgs.gnutar
-            pkgs.gzip
-          ];
-        } ''
-          mkdir -p "$out/lib/ghc/${unitId}" "$out/lib" build unpack
-          tar -xzf ${srcTarball} -C unpack --strip-components=1
-          cd unpack
+  lockedHackagePackageSet = hpkgs: hackageNix: lock:
+    hpkgs.override {
+      overrides = final: previous:
+        builtins.listToAttrs (map
+          (unit:
+            let
+              sdist = pkgs.fetchurl {
+                inherit (unit.sdist) url;
+                hash = unit.sdist.sha256;
+              };
+              packageArgs = lib.optionalAttrs (unit.name == "zlib") { inherit (pkgs) zlib; };
+              expression =
+                if hackageNix == null then null
+                else hackageNix + "/${unit.name}-${unit.version}.nix";
+              usePackageSet =
+                builtins.hasAttr unit.name previous
+                && (builtins.getAttr unit.name previous).version == unit.version;
+              package =
+                if usePackageSet then
+                  builtins.getAttr unit.name previous
+                else if expression != null && builtins.pathExists expression then
+                  final.callPackage expression packageArgs
+                else
+                  throw "penanceProject: locked Hackage package `${unit.name}-${unit.version}` needs a committed cabal2nix expression at `${toString expression}`";
+              lockedPackage =
+                if usePackageSet then package
+                else pkgs.haskell.lib.overrideCabal package (_previous: { src = sdist; });
+            in {
+              name = unit.name;
+              value = pkgs.haskell.lib.dontHaddock (
+                pkgs.haskell.lib.dontCheck (
+                  lockedPackage
+                )
+              );
+            })
+          (builtins.filter (unit: unit.source == "hackage") (lock.externalUnits or [])));
+    };
 
-          cabal_version="$(sed -n 's/^version:[[:space:]]*//p' StateVar.cabal | head -n 1)"
-          test "$cabal_version" = "${unit.version}"
-
-          ghc \
-            -hide-all-packages \
-            -no-user-package-db \
-            -this-unit-id ${unitId} \
-            -package base \
-            -package stm \
-            -package transformers \
-            -isrc \
-            -odir ../build \
-            -hidir ../build \
-            -outputdir ../build \
-            -DUSE_DEFAULT_SIGNATURES=1 \
-            -c src/Data/StateVar.hs
-
-          mkdir -p "$out/lib/ghc/${unitId}/Data"
-          cp ../build/Data/StateVar.hi "$out/lib/ghc/${unitId}/Data/"
-          ${pkgs.stdenv.cc.bintools.bintools}/bin/ar rcs "$out/lib/libHS${unitId}.a" ../build/Data/StateVar.o
-
-          ghc-pkg init "$out/lib/package.conf.d"
-          depends=()
-          for package in base stm transformers; do
-            depends+=("$(ghc-pkg field "$package" id --simple-output)")
-          done
-cat > StateVar.conf <<EOF
-name: StateVar
-version: ${unit.version}
-id: ${unitId}
-key: ${unitId}
-exposed: True
-exposed-modules: Data.StateVar
-import-dirs: $out/lib/ghc/${unitId}
-library-dirs: $out/lib
-hs-libraries: HS${unitId}
-depends: ''${depends[*]}
-EOF
-          ghc-pkg --package-db "$out/lib/package.conf.d" register StateVar.conf
-          ghc-pkg --package-db "$out/lib/package.conf.d" field StateVar version --simple-output | grep -qx "${unit.version}"
-
-          printf '%s\n' ${lib.escapeShellArg (builtins.toJSON {
-            schema = "penance/external-unit/1";
-            name = unit.name;
-            version = unit.version;
-            source = "hackage";
-            sdist = unit.sdist;
-          })} > "$out/metadata.json"
-        '';
-
-  buildExternalUnits = hpkgs: lock:
-    builtins.listToAttrs (map
-      (unit: {
-        name = unit.name;
-        value = buildExternalUnit hpkgs unit;
-      })
-      (builtins.filter (unit: unit.source == "hackage") (lock.externalUnits or [])));
-
-  shellPackageNamesFromLock = lock:
-    builtins.filter
-      (name: name != "base" && name != "template-haskell")
-      (externalUnitNamesBySource lock "ghc-boot");
-
-  devShellFromLock = lock:
+  buildExternalUnit = lockedHpkgs: packageEnvironment: unit:
     let
-      hpkgs = compilerPackagesFor (lock.compiler or "ghc-9.10.2");
-      packageNames = shellPackageNamesFromLock lock;
-      ghc = hpkgs.ghcWithPackages (ps: map (name: ps.${name}) packageNames);
+      unitId = "${unit.name}-${unit.version}";
+      packageLib = "${packageEnvironment}/lib/ghc-${lockedHpkgs.ghc.version}/lib";
     in
-      pkgs.mkShell {
+      pkgs.runCommand "penance-external-${unitId}" {} ''
+        mkdir -p "$out/lib"
+        for entry in ${packageLib}/*; do
+          ln -s "$entry" "$out/lib/$(basename "$entry")"
+        done
+        ${lockedHpkgs.ghc}/bin/ghc-pkg \
+          --package-db "$out/lib/package.conf.d" \
+          field ${lib.escapeShellArg unit.name} version --simple-output \
+          | grep -qx ${lib.escapeShellArg unit.version}
+
+        printf '%s\n' ${lib.escapeShellArg (builtins.toJSON {
+          schema = "penance/external-unit/1";
+          name = unit.name;
+          version = unit.version;
+          source = "hackage";
+          sdist = unit.sdist;
+        })} > "$out/metadata.json"
+      '';
+
+  buildExternalUnits = hpkgs: hackageNix: lock:
+    let
+      lockedHpkgs = lockedHackagePackageSet hpkgs hackageNix lock;
+      units = builtins.filter (unit: unit.source == "hackage") (lock.externalUnits or []);
+      packageEnvironment = lockedHpkgs.ghcWithPackages (
+        packages: map (unit: packages.${unit.name}) units
+      );
+    in
+      builtins.listToAttrs (map
+        (unit: {
+          name = unit.name;
+          value = buildExternalUnit lockedHpkgs packageEnvironment unit;
+        })
+        units);
+
+  localPackagesByName = lock:
+    builtins.listToAttrs (map
+      (package: {
+        name = package.name;
+        value = package;
+      })
+      (lock.packages or []));
+
+  localPackageClosure = lock: rootPackage:
+    let
+      packages = localPackagesByName lock;
+    in
+      builtins.genericClosure {
+        startSet = [{ key = rootPackage.name; value = rootPackage; }];
+        operator = item:
+          map
+            (name: { key = name; value = packages.${name}; })
+            (builtins.filter
+              (name: builtins.hasAttr name packages)
+              (lib.unique (lib.concatMap componentDependencyNames (item.value.components or []))));
+      };
+
+  shellProjectionFromLock = lock: rootPackage:
+    let
+      localPackages =
+        if rootPackage == null then
+          lock.packages or []
+        else
+          map (item: item.value) (localPackageClosure lock rootPackage);
+      dependencyNames = lib.unique (lib.concatMap
+        (package: lib.concatMap componentDependencyNames (package.components or []))
+        localPackages);
+      externalPackages = builtins.filter
+        (name:
+          name != "base"
+          && name != "template-haskell"
+          && externalUnitFor lock name != null)
+        dependencyNames;
+    in {
+      inherit externalPackages;
+      localPackages = map (package: package.name) localPackages;
+    };
+
+  devShellFromLock = hackageNix: lock: rootPackage:
+    let
+      hpkgs = compilerPackagesFor lock.compiler;
+      projection = shellProjectionFromLock lock rootPackage;
+      lockedHpkgs = lockedHackagePackageSet hpkgs hackageNix lock;
+      ghc = lockedHpkgs.ghcWithPackages (
+        packages: map (name: packages.${name}) projection.externalPackages
+      );
+    in
+      pkgs.mkShell ({
         packages = [
           ghc
           pkgs.cabal-install
-        ];
+        ] ++ lib.optional (repent != null) repent;
         PENANCE_LOCK_SCHEMA = lock.schema;
-        PENANCE_LOCK_PACKAGES = lib.concatStringsSep " " packageNames;
-      };
+        PENANCE_LOCK_PACKAGES = lib.concatStringsSep " " projection.externalPackages;
+        PENANCE_LOCAL_PACKAGES = lib.concatStringsSep " " projection.localPackages;
+        PENANCE_COMPILER = lock.compiler;
+        PENANCE_GHC_PKG = "${hpkgs.ghc}/bin/ghc-pkg";
+        PENANCE_INDEX_STATE = lock.indexState;
+      } // lib.optionalAttrs (rootPackage != null) {
+        PENANCE_PACKAGE = rootPackage.name;
+        PENANCE_PACKAGE_PATH = rootPackage.path;
+        PENANCE_CABAL_TARGET = rootPackage.name;
+      });
+
+  packageDevShellsFromLock = hackageNix: lock:
+    builtins.listToAttrs (map
+      (package: {
+        name = package.name;
+        value = devShellFromLock hackageNix lock package;
+      })
+      (lock.packages or []));
 
   componentBinName = component:
     if lib.hasPrefix "exe:" component.name then
@@ -384,47 +404,95 @@ EOF
       while IFS= read -r conf_dir; do
         test -n "$conf_dir" || continue
         test -d "$conf_dir" || continue
-        find "$conf_dir" -name '*.conf' -type f | sort | while IFS= read -r conf; do
-          ghc-pkg --package-db "$out/lib/package.conf.d" register "$conf"
+        source_lib="$(dirname "$conf_dir")"
+        for entry in "$source_lib"/*; do
+          name="$(basename "$entry")"
+          test "$name" != package.conf.d || continue
+          if [ ! -e "$out/lib/$name" ] && [ ! -L "$out/lib/$name" ]; then
+            ln -s "$entry" "$out/lib/$name"
+          fi
+        done
+        find -L "$conf_dir" -name '*.conf' -type f | sort | while IFS= read -r conf; do
+          unit_id="$(basename "$conf" .conf)"
+          if ghc-pkg --global --ipid field "$unit_id" id --simple-output >/dev/null 2>&1 \
+            || ghc-pkg --package-db "$out/lib/package.conf.d" --ipid field "$unit_id" id --simple-output >/dev/null 2>&1; then
+            continue
+          fi
+          ghc-pkg --force --package-db "$out/lib/package.conf.d" register "$conf"
         done
       done <<'CONF_DIRS'
 ${heredocLines confDirs}
 CONF_DIRS
 
       ghc-pkg --package-db "$out/lib/package.conf.d" recache
+      ghc-pkg --global --package-db "$out/lib/package.conf.d" check
     '';
 
-  componentFlagValues = lock: pkg: component: componentBuilds: externalBuilds: localDbAttr:
+  componentFlagValues = lock: pkg: component: componentBuilds: packageBuilds: externalBuilds: localDbAttr:
     let
       dependencyNames = componentDependencyNames component;
       bootNames = bootDependencyNames lock dependencyNames;
       hackageNames = hackageDependencyNames lock dependencyNames;
+      localNames = builtins.filter
+        (name: name != pkg.name && builtins.hasAttr name packageBuilds)
+        dependencyNames;
       bootFlags = lib.concatMap (name: [ "-package" name ]) bootNames;
       hackageFlags = lib.concatMap
         (name: [ "-package-db" "${externalBuilds.${name}}/lib/package.conf.d" "-package" name ])
         hackageNames;
+      localFlags = lib.concatMap
+        (name: [
+          "-package-db"
+          "${packageBuilds.${name}.components.lib.${localDbAttr}}/lib/package.conf.d"
+          "-package"
+          name
+        ])
+        localNames;
       localLibFlags =
         lib.optionals (component.name != "lib" && builtins.elem pkg.name dependencyNames)
           [ "-package-db" "${componentBuilds.lib.${localDbAttr}}/lib/package.conf.d" "-package" pkg.name ];
     in
-      [ "-hide-all-packages" "-no-user-package-db" ] ++ bootFlags ++ hackageFlags ++ localLibFlags;
+      [ "-hide-all-packages" "-no-user-package-db" ]
+      ++ bootFlags
+      ++ hackageFlags
+      ++ localFlags
+      ++ localLibFlags;
 
-  buildLocalLibrary = hpkgs: srcPath: lock: ghcOptions: pkg: component: componentBuilds: externalBuilds:
+  buildLocalLibrary = hpkgs: srcPath: lock: ghcOptions: pkg: component: componentBuilds: packageBuilds: externalBuilds:
     let
       unitId = "${pkg.name}-${pkg.version}";
       sourceDirs = component.sourceDirs or [ "." ];
       moduleNames = component.modules or [];
       modulePaths = map modulePath moduleNames;
-      flags = componentFlagValues lock pkg component componentBuilds externalBuilds "dbIface" ++ stdDevGhcOptions ++ ghcOptions;
+      dependencyNames = componentDependencyNames component;
+      flags = componentFlagValues lock pkg component componentBuilds packageBuilds externalBuilds "dbIface" ++ stdDevGhcOptions ++ ghcOptions;
       hackageDeps = hackageDependencyNames lock (componentDependencyNames component);
       hackageConfDirs = map (package: "${externalBuilds.${package}}/lib/package.conf.d") hackageDeps;
-      componentSrc = componentSourceFor srcPath pkg component;
+      localDeps = builtins.filter
+        (name: name != pkg.name && builtins.hasAttr name packageBuilds)
+        dependencyNames;
+      localConfDirs = map
+        (package: "${packageBuilds.${package}.components.lib.dbIface}/lib/package.conf.d")
+        localDeps;
+      dependencyConfDirs = hackageConfDirs ++ localConfDirs;
+      registrationDbFlags = lib.concatMap (confDir: [ "--package-db" confDir ]) dependencyConfDirs;
+      projectedSource = componentSourceProjection srcPath pkg component;
       hackageDependsShell = lib.concatMapStringsSep "\n"
         (package: ''
           depends+=("$(ghc-pkg --package-db ${externalBuilds.${package}}/lib/package.conf.d field ${package} id --simple-output)")
         '')
         hackageDeps;
+      localDependsShell = lib.concatMapStringsSep "\n"
+        (package: ''
+          depends+=("$(ghc-pkg --package-db ${packageBuilds.${package}.components.lib.dbIface}/lib/package.conf.d field ${package} id --simple-output)")
+        '')
+        localDeps;
       packageName = "penance-${sanitizeName pkg.name}-${sanitizeName component.name}";
+      canonicalizer =
+        if ifaceCanonicalizer == null then
+          throw "penanceProject: lock-backed libraries require ifaceCanonicalizer"
+        else
+          ifaceCanonicalizer;
       libDrv = pkgs.runCommand packageName {
         __contentAddressed = true;
         outputHashMode = "recursive";
@@ -432,12 +500,12 @@ CONF_DIRS
         outputs = [ "out" "iface" ];
         nativeBuildInputs = [
           hpkgs.ghc
+          canonicalizer
           pkgs.findutils
-          pkgs.perl
         ];
       } ''
         mkdir -p "$out/lib" "$iface/lib/ghc/${unitId}" build
-        cp -R ${componentSrc} source
+        cp -R ${projectedSource} source
         chmod -R u+w source
         cd source
 
@@ -446,14 +514,6 @@ ${shellArrayLines (flags ++ [ "-this-unit-id" unitId ] ++ map (dir: "-i${dir}") 
   "-odir" "../build"
   "-hidir" "../build"
   "-outputdir" "../build"
-])}
-        )
-
-        iface_flags=(
-${shellArrayLines (flags ++ [ "-this-unit-id" unitId ] ++ map (dir: "-i${dir}") sourceDirs ++ [
-  "-odir" "../iface-build"
-  "-hidir" "../iface-build"
-  "-outputdir" "../iface-build"
 ])}
         )
 
@@ -478,44 +538,21 @@ MODULES
 
         ghc --make -no-link "''${common_flags[@]}" "''${module_sources[@]}"
 
-        cat > "$TMPDIR/penance-iface-stub.pl" <<'PERL'
-use strict;
-use warnings;
+        compiler_version="$(ghc --numeric-version)"
+        iface_version="$(printf '%s' "$compiler_version" | tr -d .)"
+        case "$iface_version" in
+          ""|*[!0-9]*)
+            echo "penanceProject: cannot derive interface version from GHC $compiler_version" >&2
+            exit 1
+            ;;
+        esac
 
-my $pending;
-while (my $line = <STDIN>) {
-  if (defined $pending) {
-    if ($line =~ /^\s*$/ || $line =~ /^\s/ || $line =~ /^\Q$pending\E\b/) {
-      next;
-    }
-    undef $pending;
-  }
-
-  if ($line =~ /^([a-z_][A-Za-z0-9_']*)\s*::/) {
-    my $name = $1;
-    print $line;
-    print "$name = error \"penance iface stub\"\n";
-    $pending = $name;
-    next;
-  }
-
-  print $line;
-}
-PERL
-
-        cp -R . ../iface-source
-        find ../iface-source -name '*.hs' -type f | sort | while IFS= read -r hs; do
-          perl "$TMPDIR/penance-iface-stub.pl" < "$hs" > "$hs.stub"
-          mv "$hs.stub" "$hs"
-        done
-        (
-          cd ../iface-source
-          ghc --make -no-link "''${iface_flags[@]}" "''${module_sources[@]}"
-        )
-
-        (cd ../iface-build && find . -name '*.hi' -type f | while IFS= read -r hi; do
+        (cd ../build && find . -name '*.hi' -type f | sort | while IFS= read -r hi; do
           mkdir -p "$iface/lib/ghc/${unitId}/$(dirname "$hi")"
-          cp "$hi" "$iface/lib/ghc/${unitId}/$hi"
+          penance-iface-canon \
+            --input "$PWD/''${hi#./}" \
+            --output "$iface/lib/ghc/${unitId}/$hi" \
+            --expect-version "$iface_version"
         done)
         find ../build -name '*.o' -type f | sort > "$TMPDIR/objects"
         ${pkgs.stdenv.cc.bintools.bintools}/bin/ar rcs "$out/lib/libHS${unitId}.a" $(cat "$TMPDIR/objects")
@@ -528,6 +565,7 @@ PERL
 ${heredocLines (bootDependencyNames lock (componentDependencyNames component))}
 BOOT_DEPS
 ${hackageDependsShell}
+${localDependsShell}
 
 cat > iface.conf <<EOF
 name: ${pkg.name}
@@ -556,41 +594,45 @@ depends: ''${depends[*]}
 EOF
 
         ghc-pkg init "$iface/lib/package.conf.d"
-        ghc-pkg --package-db "$iface/lib/package.conf.d" register iface.conf
+        dependency_package_dbs=(
+${shellArrayLines registrationDbFlags}
+        )
+        ghc-pkg "''${dependency_package_dbs[@]}" --package-db "$iface/lib/package.conf.d" register iface.conf
         ghc-pkg --package-db "$iface/lib/package.conf.d" field ${pkg.name} exposed-modules --simple-output >/dev/null
 
         ghc-pkg init "$out/lib/package.conf.d"
-        ghc-pkg --package-db "$out/lib/package.conf.d" register full.conf
+        ghc-pkg "''${dependency_package_dbs[@]}" --package-db "$out/lib/package.conf.d" register full.conf
         ghc-pkg --package-db "$out/lib/package.conf.d" field ${pkg.name} exposed-modules --simple-output >/dev/null
 
         metadata=${lib.escapeShellArg (builtins.toJSON {
-          schema = "penance/local-library/2";
+          schema = "penance/local-library/3";
           package = pkg.name;
           version = pkg.version;
           component = component.name;
           lockSchema = lock.schema;
           outputs = [ "iface" "out" ];
+          interfaceCanonicalizer = "ghc-wasm";
         })}
         printf '%s\n' "$metadata" > "$out/metadata.json"
         printf '%s\n' "$metadata" > "$iface/metadata.json"
       '';
       dbIface = composePackageDb hpkgs "${packageName}-dbIface"
-        ([ "${libDrv.iface}/lib/package.conf.d" ] ++ hackageConfDirs);
+        (dependencyConfDirs ++ [ "${libDrv.iface}/lib/package.conf.d" ]);
       dbFull = composePackageDb hpkgs "${packageName}-dbFull"
-        ([ "${libDrv}/lib/package.conf.d" ] ++ hackageConfDirs);
+        (dependencyConfDirs ++ [ "${libDrv}/lib/package.conf.d" ]);
     in
       libDrv // {
         inherit dbIface dbFull;
       };
 
-  buildLocalProgram = hpkgs: srcPath: lock: ghcOptions: pkg: component: componentBuilds: externalBuilds:
+  buildLocalProgram = hpkgs: srcPath: lock: ghcOptions: runExecutables: pkg: component: componentBuilds: packageBuilds: externalBuilds:
     let
       sourceDirs = component.sourceDirs or [ "." ];
       mainPath = modulePath component.main;
       binName = componentBinName component;
-      componentSrc = componentSourceFor srcPath pkg component;
-      compileFlags = componentFlagValues lock pkg component componentBuilds externalBuilds "dbIface" ++ stdDevGhcOptions ++ ghcOptions;
-      linkFlags = componentFlagValues lock pkg component componentBuilds externalBuilds "dbFull" ++ stdDevGhcOptions ++ ghcOptions;
+      projectedSource = componentSourceProjection srcPath pkg component;
+      compileFlags = componentFlagValues lock pkg component componentBuilds packageBuilds externalBuilds "dbIface" ++ stdDevGhcOptions ++ ghcOptions;
+      linkFlags = componentFlagValues lock pkg component componentBuilds packageBuilds externalBuilds "dbFull" ++ stdDevGhcOptions ++ ghcOptions;
       packageName = "penance-${sanitizeName pkg.name}-${sanitizeName component.name}";
       runField =
         if component.kind == "test-suite" then "test"
@@ -606,7 +648,7 @@ EOF
         ];
       } ''
         mkdir -p "$out/build" build
-        cp -R ${componentSrc} source
+        cp -R ${projectedSource} source
         chmod -R u+w source
         cd source
 
@@ -669,7 +711,9 @@ ${shellArrayLines linkFlags}
         )
 
         ghc "''${link_flags[@]}" "''${object_args[@]}" -o "$out/bin/${binName}"
+${lib.optionalString (component.kind != "executable" || runExecutables) ''
         "$out/bin/${binName}" > "$out/${runField}.txt"
+''}
 
         printf '%s\n' ${lib.escapeShellArg (builtins.toJSON {
           schema = "penance/local-program-link/1";
@@ -686,26 +730,25 @@ ${shellArrayLines linkFlags}
         compile = compileDrv;
       };
 
-  buildLocalComponent = hpkgs: srcPath: lock: ghcOptions: pkg: component: componentBuilds: externalBuilds:
+  buildLocalComponent = hpkgs: srcPath: lock: ghcOptions: runExecutables: pkg: component: componentBuilds: packageBuilds: externalBuilds:
     if component.kind == "library" then
-      buildLocalLibrary hpkgs srcPath lock ghcOptions pkg component componentBuilds externalBuilds
+      buildLocalLibrary hpkgs srcPath lock ghcOptions pkg component componentBuilds packageBuilds externalBuilds
     else if component.kind == "executable" || component.kind == "test-suite" || component.kind == "benchmark" then
-      buildLocalProgram hpkgs srcPath lock ghcOptions pkg component componentBuilds externalBuilds
+      buildLocalProgram hpkgs srcPath lock ghcOptions runExecutables pkg component componentBuilds packageBuilds externalBuilds
     else
       throw "penanceProject: unsupported component kind `${component.kind}`";
 
-  packageAttrsFromLock = srcPath: lock: ghcOptions:
+  packageAttrsFromLock = srcPath: hackageNix: lock: ghcOptions: runExecutables:
     let
-      hpkgs = compilerPackagesFor (lock.compiler or "ghc-9.10.2");
-      externalBuilds = buildExternalUnits hpkgs lock;
-    in
-      builtins.listToAttrs (map
+      hpkgs = compilerPackagesFor lock.compiler;
+      externalBuilds = buildExternalUnits hpkgs hackageNix lock;
+      packageBuilds = builtins.listToAttrs (map
         (pkg:
           let
             componentBuilds = builtins.listToAttrs (map
               (component: {
                 name = component.name;
-                value = buildLocalComponent hpkgs srcPath lock ghcOptions pkg component componentBuilds externalBuilds;
+                value = buildLocalComponent hpkgs srcPath lock ghcOptions runExecutables pkg component componentBuilds packageBuilds externalBuilds;
               })
               (pkg.components or []));
             packageDefault =
@@ -723,6 +766,8 @@ ${shellArrayLines linkFlags}
             };
           })
         (lock.packages or []));
+    in
+      packageBuilds;
 
   packageAttrs = rootPlanner: skeleton:
     builtins.listToAttrs (map
@@ -748,48 +793,57 @@ in
 {
   penanceProject =
     { src
-    , compiler
-    , index-state
+    , compiler ? null
+    , index-state ? null
     , cabalProject ? "cabal.project"
     , mode ? "component"
     , flags ? {}
     , ghcOptions ? []
+    , hackageNix ? null
+    , runExecutables ? true
     }:
     let
-      srcPath = cleanSource src;
-      lockPath = srcPath + "/strata.lock";
+      srcPath = src;
+      lockPath = srcPath + "/penance.lock";
       hasLock = builtins.pathExists lockPath;
       lock =
         if hasLock then
           builtins.fromJSON (builtins.readFile lockPath)
         else
           null;
-      useLockComponents = mode == "component" && hasLock && lock.schema == "penance/strata-lock/1";
+      projectCompiler =
+        if compiler != null then compiler
+        else if lock != null then lock.compiler
+        else throw "penanceProject: `compiler` is required when no penance.lock exists";
+      projectIndexState =
+        if index-state != null then index-state
+        else if lock != null then lock.indexState
+        else throw "penanceProject: `index-state` is required when no penance.lock exists";
+      useLockComponents = mode == "component" && hasLock && lock.schema == "penance/lock/1";
       cabalProjectPath = srcPath + "/${cabalProject}";
       cabalProjectText = builtins.readFile cabalProjectPath;
       localPackageManifests = collectLocalPackageManifests srcPath cabalProjectText;
       sourceManifest = sourceManifestFor srcPath;
       skeleton = callWasmPlanner {
         src = srcPath;
-        inherit
-          cabalProjectText
-          compiler
-          flags
-          index-state
-          localPackageManifests
-          mode
-          sourceManifest
-          ;
+        compiler = projectCompiler;
+        index-state = projectIndexState;
+        inherit cabalProjectText flags localPackageManifests mode sourceManifest;
       };
       rootPlanner = plannerDrv {
         src = srcPath;
-        inherit compiler index-state skeleton;
+        compiler = projectCompiler;
+        index-state = projectIndexState;
+        inherit skeleton;
         granularity = mode;
       };
     in {
+      compiler = projectCompiler;
+      compilerPackages = compilerPackagesFor projectCompiler;
+      indexState = projectIndexState;
       packages =
         if useLockComponents then
-          packageAttrsFromLock src lock ghcOptions
+          packageAttrsFromLock srcPath hackageNix lock ghcOptions runExecutables
         else
           packageAttrs rootPlanner skeleton;
       checks = {
@@ -797,7 +851,10 @@ in
       };
       devShells =
         if useLockComponents then
-          { default = devShellFromLock lock; }
+          {
+            default = devShellFromLock hackageNix lock null;
+            packages = packageDevShellsFromLock hackageNix lock;
+          }
         else
           {};
       apps = {};

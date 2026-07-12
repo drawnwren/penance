@@ -24,7 +24,7 @@
       "haskellNixAttr": null,
       "required": true,
       "failure": "The lock suite does not yet include a Backpack fixture proving stable unit IDs, hole substitutions, and instantiated unit references.",
-      "notes": "Add a committed golden lock fixture and convert this row to a measured comparison when the fixture is checked by penance-lock."
+      "notes": "Add a committed golden lock fixture and convert this row to a measured comparison when the fixture is checked by repent."
     },
     {
       "id": "M1-target-flag-divergence",

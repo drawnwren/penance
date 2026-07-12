@@ -136,7 +136,20 @@ parseStringChars = go []
           go ('\t' : acc) rest
         '\\' : 'u' : a : b : c : d : rest
           | all isHexDigit [a, b, c, d] ->
-              go (decodeHex4 a b c d : acc) rest
+              let code = decodeHex4Int a b c d
+               in if isHighSurrogate code
+                    then
+                      case rest of
+                        '\\' : 'u' : e : f : g : h : suffix
+                          | all isHexDigit [e, f, g, h]
+                          , let low = decodeHex4Int e f g h
+                          , isLowSurrogate low ->
+                              go (chr (combineSurrogates code low) : acc) suffix
+                        _ -> Left "JSON high surrogate is not followed by a low surrogate"
+                    else
+                      if isLowSurrogate code
+                        then Left "JSON contains an unpaired low surrogate"
+                        else go (chr code : acc) rest
         '\\' : escaped : _ ->
           Left ("unsupported JSON string escape: \\" ++ [escaped])
         ch : rest ->
@@ -175,14 +188,22 @@ renderChar ch =
       | ord ch < 0x20 -> "\\u" ++ pad4 (showHex4 (ord ch))
       | otherwise -> [ch]
 
-decodeHex4 :: Char -> Char -> Char -> Char -> Char
-decodeHex4 a b c d =
-  chr
-    ( digitToInt a * 4096
-        + digitToInt b * 256
-        + digitToInt c * 16
-        + digitToInt d
-    )
+decodeHex4Int :: Char -> Char -> Char -> Char -> Int
+decodeHex4Int a b c d =
+  digitToInt a * 4096
+    + digitToInt b * 256
+    + digitToInt c * 16
+    + digitToInt d
+
+isHighSurrogate :: Int -> Bool
+isHighSurrogate code = code >= 0xd800 && code <= 0xdbff
+
+isLowSurrogate :: Int -> Bool
+isLowSurrogate code = code >= 0xdc00 && code <= 0xdfff
+
+combineSurrogates :: Int -> Int -> Int
+combineSurrogates high low =
+  0x10000 + (high - 0xd800) * 0x400 + (low - 0xdc00)
 
 showHex4 :: Int -> String
 showHex4 n

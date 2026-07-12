@@ -7,8 +7,8 @@
       "milestone": "HN",
       "title": "Cabal project translation",
       "status": "comparison",
-      "comparison": "penance-lock-vs-haskell-nix-cabal-project-plan",
-      "penanceAttr": "penanceLockBench",
+      "comparison": "repent-vs-haskell-nix-cabal-project-plan",
+      "penanceAttr": "repentBench",
       "haskellNixAttr": "haskellNixBenchPlan",
       "required": true,
       "failure": null,
@@ -120,7 +120,7 @@
       "haskellNixAttr": "haskellNixBenchPlanMaterialized",
       "required": true,
       "failure": null,
-      "notes": "Builds a penance cache manifest keyed by the committed strata.lock hash and root drv path, and compares it with a haskell.nix project whose plan-nix is supplied through the materialized argument."
+      "notes": "Builds a penance cache manifest keyed by the committed penance.lock hash and root drv path, and compares it with a haskell.nix project whose plan-nix is supplied through the materialized argument."
     }
   ]
 }

@@ -1,7 +1,6 @@
 module Penance.Blake3 (hashHex) where
 
 import Data.Bits (rotateR, shiftL, shiftR, xor, (.|.))
-import Data.List (foldl')
 import Data.Word (Word32, Word64, Word8)
 import Numeric (showHex)
 import Penance.Utf8 (encodeUtf8)
@@ -23,7 +22,6 @@ hashOutput bytes = reduce (zipWith chunkOutput [0 ..] chunks)
     chunks = if null bytes then [[]] else chunksOf 1024 bytes
     reduce [value] = value
     reduce values = reduce (pair values)
-    reduce [] = error "BLAKE3 internal error: empty tree"
     pair (left : right : rest) = parentOutput left right : pair rest
     pair [value] = [value]
     pair [] = []
@@ -32,7 +30,7 @@ chunkOutput :: Word64 -> [Word8] -> Output
 chunkOutput counter bytes = go iv 0 blocks
   where
     blocks = if null bytes then [[]] else chunksOf 64 bytes
-    lastIndex = length blocks - 1
+    go :: [Word32] -> Int -> [[Word8]] -> Output
     go _ _ [] = error "BLAKE3 internal error: empty chunk"
     go cv index [block] =
       Output
@@ -40,14 +38,13 @@ chunkOutput counter bytes = go iv 0 blocks
         , outputBlock = blockWords block
         , outputCounter = counter
         , outputBlockLength = fromIntegral (length block)
-        , outputFlags = chunkStart index .|. chunkEnd
+        , outputFlags = chunkStart index .|. flagChunkEnd
         }
     go cv index (block : rest) =
       let flags = chunkStart index
           next = take 8 (compress cv (blockWords block) counter 64 flags)
        in go next (index + 1) rest
     chunkStart index = if index == 0 then flagChunkStart else 0
-    chunkEnd = if lastIndex >= 0 then flagChunkEnd else 0
 
 parentOutput :: Output -> Output -> Output
 parentOutput left right =

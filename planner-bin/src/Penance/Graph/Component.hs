@@ -6,22 +6,29 @@ where
 
 import qualified Penance.Json as Json
 import Penance.Json (array, object, string)
-import Penance.Plan
+import Penance.Skeleton
   ( LocalComponent (..)
   , LocalPackage (..)
   , ProjectSkeleton (..)
-  , drvFileFor
-  , skeletonPath
-  , writeJsonFile
   )
-import System.Directory (copyFile, createDirectoryIfMissing)
+import Penance.Plan (drvFileFor, writeJsonFile)
+import Penance.Types
+  ( ComponentKind
+  , PlanArtifactKind (..)
+  , PlanStatus (..)
+  , renderComponentKind
+  , renderGranularity
+  , renderPlanArtifactKind
+  , renderPlanStatus
+  )
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
 
 data ComponentEntry = ComponentEntry
   { entryPackage :: String
   , entryVersion :: String
   , entryComponent :: String
-  , entryKind :: String
+  , entryKind :: ComponentKind
   , entryUnit :: String
   , entryPath :: FilePath
   }
@@ -37,7 +44,6 @@ emitBootstrap :: ProjectSkeleton -> FilePath -> IO ()
 emitBootstrap skeleton out = do
   let dir = out </> "components"
   createDirectoryIfMissing True dir
-  copyFile (skeletonPath skeleton) (dir </> "component-graph.bootstrap.json")
   writeJsonFile (dir </> "component-graph.json") (componentGraphJson skeleton)
   mapM_ (writeComponentPlan out) (componentEntries skeleton)
 
@@ -58,11 +64,11 @@ componentEntries skeleton =
 componentGraphJson :: ProjectSkeleton -> Json.Json
 componentGraphJson skeleton =
   object
-    [ ("kind", string "componentGraph")
-    , ("status", string "planned")
+    [ ("kind", string (renderPlanArtifactKind ComponentGraphArtifact))
+    , ("status", string (renderPlanStatus Planned))
     , ("projectKey", string (projectKey skeleton))
     , ("planCacheKey", string (planCacheKey skeleton))
-    , ("granularity", string (granularity skeleton))
+    , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("components", array (map componentEntryJson (componentEntries skeleton)))
     ]
 
@@ -72,7 +78,7 @@ componentEntryJson entry =
     [ ("package", string (entryPackage entry))
     , ("version", string (entryVersion entry))
     , ("component", string (entryComponent entry))
-    , ("componentKind", string (entryKind entry))
+    , ("componentKind", string (renderComponentKind (entryKind entry)))
     , ("unit", string (entryUnit entry))
     , ("drvPlan", string (entryPath entry))
     ]
@@ -84,12 +90,12 @@ writeComponentPlan out entry = do
   writeJsonFile
     path
     ( object
-        [ ("kind", string "componentDrv")
-        , ("status", string "planned")
+        [ ("kind", string (renderPlanArtifactKind ComponentDrvArtifact))
+        , ("status", string (renderPlanStatus Planned))
         , ("package", string (entryPackage entry))
         , ("version", string (entryVersion entry))
         , ("component", string (entryComponent entry))
-        , ("componentKind", string (entryKind entry))
+        , ("componentKind", string (renderComponentKind (entryKind entry)))
         , ("unit", string (entryUnit entry))
         ]
     )

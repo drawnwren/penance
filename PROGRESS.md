@@ -6,8 +6,8 @@ The benchmark/parity layer is real and green, and penance now has a usable
 unit-granularity MVP for committed schema-1 locks. Concretely, in the current
 tree:
 
-- `penance-lock` (planner-bin/src/LockMain.hs) locks local packages and solved
-  external units under schema `penance/strata-lock/1`, including exact
+- `repent` (planner-bin/src/RepentMain.hs) locks local packages and solved
+  external units under schema `penance/lock/1`, including exact
   StateVar sdist pins and `ghc-boot` markers for compiler-bundled packages.
 - `penanceLib.penanceProject` (nix/lib.nix) lowers committed locks to real
   component derivations without IFD at unit granularity. Ordinary local
@@ -20,10 +20,10 @@ tree:
   and cache/warp harnesses.
 
 **MVP definition (every clause mechanically checkable):** a user can point
-`penanceProject` at a Cabal project with a committed `strata.lock` and get
+`penanceProject` at a Cabal project with a committed `penance.lock` and get
 (1) real component derivations that compile with GHC, external deps pinned by
 the lock, evaluated without IFD; (2) a dev shell derived from the lock;
-(3) `penance-lock --check` freshness guarding all of it; (4) the benchmark
+(3) `repent --check` freshness guarding all of it; (4) the benchmark
 matrices' penance attrs flowing through this lock path instead of hand-rolled
 helpers; (5) `nix run .#bench` green throughout. All at `granularity = unit`.
 Module granularity (Arc B) is the post-MVP differentiator.
@@ -73,8 +73,8 @@ Module granularity (Arc B) is the post-MVP differentiator.
 
 ## A1 — Solve and lock external dependencies
 
-Extend `penance-lock` so `strata.lock` records **solved external units**, not
-just local components with ranges. Schema bump to `penance/strata-lock/1`.
+Extend `repent` so `penance.lock` records **solved external units**, not
+just local components with ranges. Schema bump to `penance/lock/1`.
 Each external unit needs at minimum: name, exact version, and a content hash
 for its Hackage sdist (so A2 can `fetchurl` it without trust); mark
 GHC-bundled boot libraries (base, template-haskell, containers, …) as
@@ -88,20 +88,20 @@ mechanism: byte-deterministic output given the same inputs and `--index-state`
 
 Add a fixture that actually exercises non-boot resolution:
 `tests/fixtures/lock-external/` — a one-module executable depending on
-`StateVar` — with its golden `strata.lock` committed.
+`StateVar` — with its golden `penance.lock` committed.
 
 Test:
 
 ```sh
 # determinism: generate the lock twice, byte-identical
-nix run .#penance-lock -- --project tests/fixtures/lock-external --out /tmp/l1
-nix run .#penance-lock -- --project tests/fixtures/lock-external --out /tmp/l2
+nix run .#repent -- --project tests/fixtures/lock-external --out /tmp/l1
+nix run .#repent -- --project tests/fixtures/lock-external --out /tmp/l2
 cmp /tmp/l1 /tmp/l2
 # freshness (negative): add a dependency to the fixture .cabal in a scratch
 # copy; --check against the committed lock must exit nonzero.
 # content: jq asserts the lock has a StateVar unit with an exact version and
 # a non-empty sdist hash, and base marked ghc-boot.
-# bench fixture: regenerate tests/bench/vs-haskell-nix/project/strata.lock
+# bench fixture: regenerate tests/bench/vs-haskell-nix/project/penance.lock
 # under the new schema; its existing freshness row must stay green.
 ```
 
@@ -191,7 +191,7 @@ Test:
 nix develop -c cabal build all   # bench fixture: zero external builds
 nix build .#penanceBenchShell --no-link -L   # sandboxed proof still passes
 # negative: add a dependency to the fixture .cabal without regenerating the
-# lock — penance-lock --check (already wired into the M1 row) must fail,
+# lock — repent --check (already wired into the M1 row) must fail,
 # proving the shell cannot silently drift from the lock.
 ```
 
@@ -328,10 +328,11 @@ lock-built simple-lib + consumer:
 
 - [x] Both directions assert; results recorded as suite artifacts; row
       converted; focused bench green. Implementation note: raw GHC `.hi`
-      files still include a changing `src_hash` under the dev pragma flags, so
-      the A2 builder compiles `iface` from body-erased ABI stubs and `out` from
-      the real source; the dynamic-probes B5 matrix proves the resulting
-      `dbIface`/`dbFull` cutoff behavior.
+      files still include a changing `src_hash` under the dev pragma flags.
+      The A2 builder now sends the real interfaces through the shared
+      GHC-Wasm canonicalizer, while `out` retains the real objects; the
+      dynamic-probes B5 matrix proves the resulting `dbIface`/`dbFull` cutoff
+      behavior.
 
 ## B6 — `.hi` determinism soak
 
@@ -342,7 +343,7 @@ corrupted hash in a scratch copy must fail the comparison.
 
 - [x] 5/5 identical; self-check green; wired into bench; row converted.
 
-## B7 — `strata-plan`: real planner with dynamic derivation emission
+## B7 — `penance-plan`: real planner with dynamic derivation emission
 
 Closes `M4-dynamic-derivation-emission`. Implement the C4 planner as a
 planner-bin executable (suggested `penance-plan`), pinned into a store path,
@@ -437,10 +438,10 @@ run outputs byte-equal, both wired into bench.
 - **Shared comparison-row scripts**: `runBenchChecks` and
   `stateVarProofScript` exist so both sides of a row run identical checks;
   extend them rather than re-inlining per side.
-- **Ignored-artifact lists exist in two places**: `skipCopyPath`
-  (RebuildBenchMain.hs, basename-matched) and `ignoredSourceName`
-  (nix/lib.nix). When adding a new build-artifact directory name, update
-  both — or better, unify them when touching either for other reasons.
+- **Benchmark worktree copies exclude generated artifacts** through
+  `skipCopyPath` in `RebuildBenchMain.hs`. This is harness hygiene only;
+  `penanceProject` deliberately applies no repository-wide source filter, so
+  callers own the semantics of the `src` value they pass.
 - The allow-failure accounting (`rowIsAllowedFailure` etc.) is intentionally
   duplicated between ArchitectureBenchMain and RebuildBenchMain; it gets
   restructured when the per-row matrix fields land (below), not before.

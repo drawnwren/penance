@@ -36,7 +36,7 @@ in
   else if !(builtins.pathExists plannerWasm) then
     throw ''
       penanceProject expected a committed planner Wasm blob at ${toString plannerWasm}.
-      Build .#wasmPlannerBuiltin with GHC's wasm32-wasi backend and commit/copy
+      Build .#ghcWasmPlanner with GHC's wasm32-wasi backend and commit/copy
       the result to nix/planner.wasm.
     ''
   else

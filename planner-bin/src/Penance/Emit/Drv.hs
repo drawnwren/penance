@@ -6,24 +6,30 @@ import qualified Penance.Graph.Module as Module
 import qualified Penance.Graph.Package as Package
 import qualified Penance.Json as Json
 import Penance.Json (array, bool, object, string)
-import Penance.Plan (ExpectedOutputs (..), ProjectSkeleton (..), skeletonPath, writeJsonFile)
-import System.Directory (copyFile)
+import Penance.Plan (writeJsonFile)
+import Penance.Skeleton (ExpectedOutputs (..), ProjectSkeleton (..))
+import Penance.Types
+  ( PlanArtifactKind (..)
+  , PlanStatus (..)
+  , renderGranularity
+  , renderPlanArtifactKind
+  , renderPlanStatus
+  )
 import System.FilePath ((</>))
 
 writeBootstrapIndex :: ProjectSkeleton -> FilePath -> IO ()
 writeBootstrapIndex skeleton out = do
-  copyFile (skeletonPath skeleton) (out </> "drv-index.bootstrap.json")
   writeJsonFile (out </> "drv-index.json") (indexJson skeleton)
   writeJsonFile (out </> "graph-plan.json") (graphPlanJson skeleton)
 
 indexJson :: ProjectSkeleton -> Json.Json
 indexJson skeleton =
   object
-    [ ("kind", string "drvIndex")
-    , ("status", string "planned")
+    [ ("kind", string (renderPlanArtifactKind DrvIndexArtifact))
+    , ("status", string (renderPlanStatus Planned))
     , ("projectKey", string (projectKey skeleton))
     , ("planCacheKey", string (planCacheKey skeleton))
-    , ("granularity", string (granularity skeleton))
+    , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("packages", entryArray (Package.packagePlanEntries skeleton))
     , ("components", entryArray (Component.componentDrvEntries skeleton))
     , ("modules", entryArray (Module.moduleDrvEntries skeleton))
@@ -33,11 +39,11 @@ indexJson skeleton =
 graphPlanJson :: ProjectSkeleton -> Json.Json
 graphPlanJson skeleton =
   object
-    [ ("kind", string "graphPlan")
-    , ("status", string "planned")
+    [ ("kind", string (renderPlanArtifactKind GraphPlanArtifact))
+    , ("status", string (renderPlanStatus Planned))
     , ("projectKey", string (projectKey skeleton))
     , ("planCacheKey", string (planCacheKey skeleton))
-    , ("granularity", string (granularity skeleton))
+    , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("rootFiles", rootFilesJson)
     , ("expectedOutputs", expectedOutputsJson (expectedOutputs skeleton))
     , ("packages", entryArray (Package.packagePlanEntries skeleton))

@@ -1,12 +1,12 @@
 # penance Architecture
 
-`penance` is the implementation track for the STRATA architecture described in
+`penance` is the implementation track for the Penance architecture described in
 `docs/NEW_ARCHITECTURE.MD`: a haskell.nix replacement for Backpack-heavy,
 embedded NixOS monorepos.
 
 This document is intentionally not a copy of the full spec. It records the
 target architecture, the current prototype state, the deficiencies we must
-close, and the migration plan for getting from here to the STRATA design.
+close, and the migration plan for getting from here to the Penance design.
 
 ## Status
 
@@ -16,12 +16,12 @@ The checkout currently implements a Wasm-assisted evaluation path that reads a
 source tree, produces a `ProjectSkeleton`, and builds a root planner derivation
 that emits graph-plan JSON. This validates the basic shape of cheap Nix eval
 and graph planning, but it is still missing the architectural pieces that make
-STRATA correct and useful at scale:
+Penance correct and useful at scale:
 
 - an MVP lock-driven unit builder for ordinary local components and the
   StateVar external sdist fixture, including content-addressed split
-  `iface`/`out` outputs for ordinary local units, but not a full Cabal solver
-  or Backpack-aware lock
+  `iface`/`out` outputs for ordinary local units; external resolution now uses
+  Cabal's real plan, but lock v1 still coalesces units and is not Backpack-aware
 - no production module `.drv` emission through `nix derivation add`; the
   architecture suite currently exercises `ghc -M` and per-module GHC compile
   steps as the first real module-granular target
@@ -33,7 +33,7 @@ STRATA correct and useful at scale:
   warp device loop; the architecture suite currently exercises file-cache
   bundle and local hot-swap targets
 
-Stack project translation is not part of the STRATA product target. Cabal is
+Stack project translation is not part of the Penance product target. Cabal is
 the solver of record because the target architecture depends on Backpack-aware
 unit planning, and Stack does not model the Backpack semantics this project
 needs to preserve.
@@ -76,10 +76,11 @@ Every implementation change must preserve these rules.
 
 ### 1. Lock Layer
 
-`penance-lock`/`strata-lock` is a Haskell CLI that links the pinned
-`cabal-install` and `Cabal` libraries. It runs the Cabal solver at commit time,
-elaborates the install plan down to units, and writes canonical JSON to
-`strata.lock`.
+`repent` is a Haskell CLI that invokes pinned `cabal-install` and links the
+`Cabal` library. It runs the Cabal solver at commit time, converts the resulting
+`plan.json`, and writes canonical JSON to `penance.lock`. The implemented v1
+conversion coalesces external configured units by package; the target schema
+retains the complete unit graph described below.
 
 The lock contains, per target platform:
 
@@ -99,9 +100,9 @@ for bootstrapping, but it is not the final architecture.
 
 ### 2. Eval Layer
 
-Nix consumes `strata.lock` and lowers it to derivations in O(lock size).
+Nix consumes `penance.lock` and lowers it to derivations in O(lock size).
 
-Primary lowering uses a committed `strata-lower.wasm` via `builtins.wasm`.
+Primary lowering uses a committed `penance-lower.wasm` via `builtins.wasm`.
 Fallback lowering uses pure Nix `fromJSON` plus library functions. The two
 lowerers must produce the same attrset shape and are golden-tested against each
 other.
@@ -111,13 +112,20 @@ The flake surface should expose:
 - `packages.<system>.<name>` for local package defaults
 - `packages.<system>."<pkg>:<ctype>:<cname>"` for component compatibility
 - `devShells.<system>.default`
-- `legacyPackages.<system>.strata.{units,pkgdbs,toolchains,projection}`
+- `devShells.<system>.<name>` for package-scoped development
+- `legacyPackages.<system>.penance.{units,pkgdbs,toolchains,projection}`
 - `lib.overlay`
-- `apps.<system>.{warp,msc,penance-lock}`
+- `apps.<system>.{warp,msc,repent}`
 
-The current `wasm-planner` and `nix/planner.wasm` remain bootstrap artifacts
-until the lock-based lowerer exists. They should not grow into a second Cabal
-implementation.
+The current Haskell normalizer and `nix/planner.wasm` remain bootstrap
+artifacts until the lock-based lowerer exists. They should not grow into a
+second Cabal implementation.
+
+The committed module is built with GHC's `wasm32-wasi` backend as an ordinary
+WASI command module. Determinate Nix detects its `wasi_snapshot_preview1`
+imports, passes the input value ID in `argv[1]`, runs `_start`, and receives the
+result through the `env.return_to_nix` host import. This evaluator path does not
+use a browser, reactor mode, or the JavaScript FFI.
 
 ### 3. Build Layer
 
@@ -131,7 +139,8 @@ Unit builder:
 - drives Cabal `Setup configure/build/install/register`
 - passes exact dependencies and Cabal-compatible `--cid`
 - passes `--instantiate-with` for Backpack instantiations
-- emits `iface` and `out` outputs
+- emits `iface` and `out` outputs; the current ordinary-unit path builds real
+  native interfaces and canonicalizes them with the shared GHC-Wasm tool
 
 Module planner:
 
@@ -139,11 +148,12 @@ Module planner:
   `granularity = "module"`
 - is itself a planner derivation requiring `recursive-nix`
 - discovers the module DAG at build time
-- emits one content-addressed derivation per module with `nix derivation add`
+- emits a real object derivation and a GHC-Wasm interface-canonicalizer
+  derivation per needed module with `nix derivation add`
 - emits an assemble/link derivation whose outputs match the unit builder
 - is consumed through `builtins.outputOf`
 
-The module planner starts with the STRATA mechanism: `ghc -M` against the
+The module planner starts with the Penance mechanism: `ghc -M` against the
 unit's package DB, conservative Template Haskell classification, per-file CA
 source paths, and deterministic JSON derivation emission. Hard cases that the
 planner cannot model safely, such as complicated `hs-boot`, plugins, generated
@@ -227,7 +237,7 @@ does not prove real derivation emission, content addressing, or rebuild cutoff.
 
 | Deficiency | Consequence | Remedy | Exit criterion |
 |---|---|---|---|
-| Nix eval reads Cabal files and source manifests | Eval can become a partial Cabal implementation | Add `penance-lock`; eval consumes only `strata.lock` | `allow-import-from-derivation=false` check passes and eval does not parse `.cabal` files |
+| Nix eval reads Cabal files and source manifests | Eval can become a partial Cabal implementation | Add `repent`; eval consumes only `penance.lock` | `allow-import-from-derivation=false` check passes and eval does not parse `.cabal` files |
 | No committed unit lock | Unit IDs and Backpack substitutions are provisional | Use Cabal `ElaboratedInstallPlan` and canonical JSON lock emission | Golden lock is byte-stable across machines |
 | Wasm planner is a scanner | Hackage/Cabal edge cases are under-modeled | Restrict Wasm to lock lowering; move Cabal semantics into lock tool | Wasm and Nix lowerers are golden-equal on lock fixtures |
 | Planner emits `*.drv.plan.json`, not `.drv` files | Builds cannot exercise dynamic derivations or cutoff | Implement `nix derivation add` emission and `builtins.outputOf` consumption | Probe chain builds from planner to child drv to assemble drv |
@@ -243,7 +253,7 @@ does not prove real derivation emission, content addressing, or rebuild cutoff.
 1. M0: pin Determinate Nix and add primitive probes for JSON derivation add,
    text-hash planner output, `builtins.outputOf`, recursive-nix `add-path`,
    CA interface cutoff, remote builders, and planner determinism.
-2. M1: implement `penance-lock` for ordinary units, including `--check`,
+2. M1: implement `repent` for ordinary units, including `--check`,
    canonical lock output, source pins, and golden tests.
 3. M2: implement pure Nix lowering, static unit builder, `dbIface`/`dbFull`,
    initial dev shell, and the input-addressed kill-switch baseline.
@@ -297,9 +307,9 @@ that file directly.
 For the current prototype artifact:
 
 ```sh
-nix build .#wasmPlannerBuiltin -o result-wasm-builtin
+nix build .#ghcWasmPlanner -o result-ghc-wasm-planner
 chmod u+w nix/planner.wasm
-cp result-wasm-builtin/planner.wasm nix/planner.wasm
+cp result-ghc-wasm-planner/planner.wasm nix/planner.wasm
 chmod 0555 nix/planner.wasm
 ```
 
@@ -359,7 +369,7 @@ stays visible as a functionality gap.
 
 They must be hardened by architecture-gating tests before cutover:
 
-- full lock determinism beyond the benchmark `penance-lock --check`
+- full lock determinism beyond the benchmark `repent --check`
 - wasm-vs-Nix lowerer equality
 - Backpack rebuild matrix
 - dev shell HLS and multi-repl projection beyond the current external-package
