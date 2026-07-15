@@ -4,4 +4,5 @@
 dist-newstyle/
 /.direnv
 /docs/bench-results
+/.penance/bench-results
 /book

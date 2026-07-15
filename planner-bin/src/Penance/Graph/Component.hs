@@ -10,6 +10,11 @@ import Penance.Skeleton
   ( LocalComponent (..)
   , LocalPackage (..)
   , ProjectSkeleton (..)
+  , UnitKey
+  , componentUnitKey
+  , renderComponentId
+  , renderPkgName
+  , renderUnitKey
   )
 import Penance.Plan (drvFileFor, writeJsonFile)
 import Penance.Types
@@ -29,14 +34,14 @@ data ComponentEntry = ComponentEntry
   , entryVersion :: String
   , entryComponent :: String
   , entryKind :: ComponentKind
-  , entryUnit :: String
+  , entryUnit :: UnitKey
   , entryPath :: FilePath
   }
   deriving (Eq, Show)
 
 componentDrvEntries :: ProjectSkeleton -> [(String, FilePath)]
 componentDrvEntries skeleton =
-  [ (entryUnit entry, entryPath entry)
+  [ (renderUnitKey (entryUnit entry), entryPath entry)
   | entry <- componentEntries skeleton
   ]
 
@@ -50,12 +55,12 @@ emitBootstrap skeleton out = do
 componentEntries :: ProjectSkeleton -> [ComponentEntry]
 componentEntries skeleton =
   [ ComponentEntry
-      { entryPackage = packageName pkg
+      { entryPackage = renderPkgName (packageName pkg)
       , entryVersion = packageVersion pkg
-      , entryComponent = componentName component
+      , entryComponent = renderComponentId (componentName component)
       , entryKind = componentKind component
-      , entryUnit = packageName pkg ++ ":" ++ componentName component
-      , entryPath = "components" </> packageName pkg </> drvFileFor (componentName component)
+      , entryUnit = componentUnitKey (packageName pkg) (componentName component)
+      , entryPath = "components" </> renderPkgName (packageName pkg) </> drvFileFor (renderComponentId (componentName component))
       }
   | pkg <- localPackages skeleton
   , component <- packageComponentDetails pkg
@@ -66,8 +71,6 @@ componentGraphJson skeleton =
   object
     [ ("kind", string (renderPlanArtifactKind ComponentGraphArtifact))
     , ("status", string (renderPlanStatus Planned))
-    , ("projectKey", string (projectKey skeleton))
-    , ("planCacheKey", string (planCacheKey skeleton))
     , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("components", array (map componentEntryJson (componentEntries skeleton)))
     ]
@@ -79,7 +82,7 @@ componentEntryJson entry =
     , ("version", string (entryVersion entry))
     , ("component", string (entryComponent entry))
     , ("componentKind", string (renderComponentKind (entryKind entry)))
-    , ("unit", string (entryUnit entry))
+    , ("unit", string (renderUnitKey (entryUnit entry)))
     , ("drvPlan", string (entryPath entry))
     ]
 
@@ -96,6 +99,6 @@ writeComponentPlan out entry = do
         , ("version", string (entryVersion entry))
         , ("component", string (entryComponent entry))
         , ("componentKind", string (renderComponentKind (entryKind entry)))
-        , ("unit", string (entryUnit entry))
+        , ("unit", string (renderUnitKey (entryUnit entry)))
         ]
     )

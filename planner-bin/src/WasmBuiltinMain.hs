@@ -6,7 +6,11 @@ import Data.Word (Word32, Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Marshal.Array (peekArray, withArrayLen)
 import Foreign.Ptr (Ptr, nullPtr)
+import Penance.Json (Json (..))
+import qualified Penance.Json as Json
+import Penance.Json.Decode (asObject)
 import Penance.Utf8 (decodeUtf8, encodeUtf8)
+import Penance.LockLowerer (lowerLockInput)
 import Penance.WasmPlanner (normalizeProject)
 import System.Environment (getArgs)
 import Text.Read (readMaybe)
@@ -30,12 +34,21 @@ main = do
     [valueText]
       | Just valueId <- readMaybe valueText -> do
           inputBytes <- readNixString valueId
-          case decodeUtf8 inputBytes >>= normalizeProject of
+          case decodeUtf8 inputBytes >>= dispatchPlanner of
             Left err -> abortToNix ("penance wasm planner failed: " ++ err)
             Right output -> do
               result <- makeNixString (encodeUtf8 output)
               returnToNix result
     _ -> abortToNix "penance wasm planner expected one Nix ValueId argument"
+
+dispatchPlanner :: String -> Either String String
+dispatchPlanner input = do
+  fields <- Json.parseJson input >>= asObject "planner input"
+  case lookup "operation" fields of
+    Just (JsonString "lower-lock") -> lowerLockInput input
+    Just (JsonString operation) -> Left ("unsupported planner operation `" ++ operation ++ "`")
+    Just other -> Left ("planner operation must be a string, got " ++ show other)
+    Nothing -> normalizeProject input
 
 readNixString :: Word32 -> IO [Word8]
 readNixString valueId = do

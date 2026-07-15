@@ -6,7 +6,8 @@
 
 - [Developer architecture overview](DEVELOPER_ARCHITECTURE.md)
 - [Current contract and gaps](ARCHITECTURE.md)
-- [Penance target architecture](NEW_ARCHITECTURE.MD)
+- [Penance target architecture](NEW_ARCHITECTURE.md)
+- [Using `penanceProject`](USING_PENANCE_PROJECT.md)
 
 # Build Backends
 
@@ -17,4 +18,3 @@
 
 - [Architecture testing](ARCHITECTURE_TESTING.md)
 - [Benchmarks](BENCHMARKS.md)
-

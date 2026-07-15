@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  static:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - uses: DeterminateSystems/flakehub-cache-action@main
+      - name: Static architecture and Haskell checks
+        run: |
+          system=$(nix eval --raw --impure --expr builtins.currentSystem)
+          nix build -L \
+            ".#checks.$system.nix-format" \
+            ".#checks.$system.architecture-suite-static" \
+            ".#checks.$system.haskell-nix-baseline-static" \
+            ".#checks.$system.architecture-functionality-static" \
+            ".#checks.$system.penance-tests" \
+            ".#checks.$system.hackage-lock-resolution" \
+            ".#checks.$system.repent-lock-proof" \
+            ".#checks.$system.shared-package-set" \
+            ".#checks.$system.ghc-wasm-planner" \
+            ".#checks.$system.planner-wasm-provenance" \
+            ".#checks.$system.lowerer-wasm-provenance" \
+            ".#checks.$system.iface-canonicalizer-wasm-provenance"
+      - name: Evaluate copyable examples
+        run: |
+          nix flake check path:./examples/basic \
+            --override-input penance "path:$PWD" --no-build
+          nix flake check path:./examples/multi-package \
+            --override-input penance "path:$PWD" --no-build
+
+  dynamic-manual:
+    if: ${{ false }}
+    runs-on: [self-hosted, recursive-nix]
+    steps:
+      - run: echo "Manual tier for recursive-Nix and dynamic-derivation probes"

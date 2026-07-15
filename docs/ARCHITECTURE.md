@@ -1,7 +1,7 @@
 # penance Architecture
 
 `penance` is the implementation track for the Penance architecture described in
-`docs/NEW_ARCHITECTURE.MD`: a haskell.nix replacement for Backpack-heavy,
+`docs/NEW_ARCHITECTURE.md`: a haskell.nix replacement for Backpack-heavy,
 embedded NixOS monorepos.
 
 This document is intentionally not a copy of the full spec. It records the
@@ -18,13 +18,14 @@ that emits graph-plan JSON. This validates the basic shape of cheap Nix eval
 and graph planning, but it is still missing the architectural pieces that make
 Penance correct and useful at scale:
 
-- an MVP lock-driven unit builder for ordinary local components and the
+- a schema-2 lock-driven unit builder for ordinary local components and the
   StateVar external sdist fixture, including content-addressed split
-  `iface`/`out` outputs for ordinary local units; external resolution now uses
-  Cabal's real plan, but lock v1 still coalesces units and is not Backpack-aware
-- no production module `.drv` emission through `nix derivation add`; the
-  architecture suite currently exercises `ghc -M` and per-module GHC compile
-  steps as the first real module-granular target
+  `iface`/`out` outputs for ordinary local units and per-unit external package
+  DB slices; external resolution retains Cabal unit IDs, flags, edges, and
+  Backpack instantiation metadata without package-level coalescing
+- experimental production module `.drv` emission through
+  `nix derivation add`; the architecture suite exercises `ghc -M`, per-module
+  GHC compile steps, and exact rebuild-event cutoff fixtures
 - no content-addressed split builder yet for Hackage, Backpack, or
   module-granular units
 - only prototype Backpack graph artifacts, not Cabal-accurate unit nodes
@@ -52,7 +53,7 @@ Every implementation change must preserve these rules.
 3. Build graph nodes are Cabal/GHC units, not packages. Units include ordinary
    components, indefinite Backpack libraries, and fully instantiated Backpack
    libraries.
-4. Haskell derivations are content-addressed by default and split compile-time
+4. Haskell derivations split compile-time
    interfaces from runtime/link outputs:
    - `iface`: `.hi`/`.hie` plus package confs that reference only interface
      paths
@@ -60,6 +61,8 @@ Every implementation change must preserve these rules.
 5. Dynamic derivations are used only where the graph is not known at lock time:
    the module DAG inside eligible local units. Hackage units and Backpack units
    remain unit-level derivations.
+   Component mode is input-addressed by default and enables CA derivations only
+   when the caller sets `contentAddressed = true`.
 6. Devices see only input-addressed, realized store paths. CA derivations,
    dynamic derivations, and realisations are build-farm concerns.
 7. Planner output is deterministic: sorted maps, canonical JSON, no clocks,
@@ -78,9 +81,9 @@ Every implementation change must preserve these rules.
 
 `repent` is a Haskell CLI that invokes pinned `cabal-install` and links the
 `Cabal` library. It runs the Cabal solver at commit time, converts the resulting
-`plan.json`, and writes canonical JSON to `penance.lock`. The implemented v1
-conversion coalesces external configured units by package; the target schema
-retains the complete unit graph described below.
+`plan.json`, and writes canonical schema-2 JSON to `penance.lock`. Every
+configured unit is retained by unit ID with its complete flags, dependency
+edges, and Backpack instantiation metadata.
 
 The lock contains, per target platform:
 

@@ -1,0 +1,26 @@
+cabal-version: 3.4
+name: real-plan-fixture
+version: 0.1.0.0
+build-type: Custom
+license: NONE
+
+custom-setup
+  setup-depends:
+      base >=4.15 && <5
+    , Cabal >=3.4 && <3.5
+
+library
+  exposed-modules: Fixture
+  hs-source-dirs: src
+  build-depends: base >=4.15 && <5
+  build-tool-depends: hsc2hs:hsc2hs
+  default-language: Haskell2010
+
+executable real-plan-fixture
+  main-is: Main.hs
+  hs-source-dirs: app
+  build-depends:
+      base >=4.15 && <5
+    , real-plan-fixture
+  default-language: Haskell2010
+

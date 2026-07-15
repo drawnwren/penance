@@ -249,7 +249,7 @@ their dependency solver.
 
 ## Lock layer
 
-### Implemented v1 lock
+### Implemented schema-2 lock
 
 `repent` uses the Cabal library to inspect local package descriptions, invokes
 the pinned `cabal-install` executable to produce an elaborated `plan.json`, and
@@ -271,12 +271,12 @@ penance.lock
 ```
 
 External versions and dependencies come from Cabal's configured and
-pre-existing units. Repository tarball hashes are converted from Cabal's
-`pkg-src-sha256` into Nix SRI hashes. The flake wrapper provides an immutable,
-pre-populated Cabal directory, so planning is offline and constrained by the
-requested index state. Schema v1 still coalesces configured units by package;
-it is therefore solver-backed but not yet the target unit-elaborated Backpack
-lock.
+pre-existing units. Each entry is keyed by Cabal unit ID and retains its
+complete flag assignment, normal and executable dependency edges, component
+style, and Backpack instantiations. Repository tarball hashes are converted
+from Cabal's `pkg-src-sha256` into Nix SRI hashes. The flake wrapper provides an
+immutable, pre-populated Cabal directory, so planning is offline and
+constrained by the requested index state.
 
 ### Target lock
 
@@ -372,8 +372,9 @@ recursive component attrset for every local package.
 
 ### Libraries
 
-`buildLocalLibrary` currently builds a content-addressed derivation with
-separate `iface` and `out` outputs. It compiles the real sources for objects,
+`buildLocalLibrary` builds a derivation with separate `iface` and `out`
+outputs. It is input-addressed by default and becomes content-addressed when
+the project opts into `contentAddressed = true`. It compiles the real sources for objects,
 then passes the real `.hi` files through `penance-iface-canon`, a GHC-Wasm
 program linked against the GHC libraries. Two composed package databases
 expose the split:
@@ -709,7 +710,7 @@ addressing can fall back to input addressing while consuming the same lock.
 ## Further reading
 
 - [Architecture](ARCHITECTURE.md) is the concise current contract and gap list.
-- [Penance architecture specification](NEW_ARCHITECTURE.MD) contains schemas,
+- [Penance architecture specification](NEW_ARCHITECTURE.md) contains schemas,
   invariants, detailed target behavior, and milestone sequencing.
 - [Module backend](MODULE_BACKEND.md) records hard module-planning cases.
 - [Backpack](BACKPACK.md) records the Backpack-specific model.

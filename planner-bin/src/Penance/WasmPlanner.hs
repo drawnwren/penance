@@ -4,12 +4,32 @@ module Penance.WasmPlanner
   )
 where
 
-import Data.Char (isHexDigit, isSpace, toLower)
-import Data.List (intercalate, isPrefixOf, nub, sort, sortBy)
+import Data.Char (isHexDigit, toLower)
+import Data.List (isPrefixOf, sort, sortBy)
 import Data.Maybe (fromMaybe, mapMaybe)
-import Penance.Blake3 (hashHex)
+import Penance.Blake3 (Blake3Digest, hash, hashHex, renderBlake3Digest)
+import Penance.CabalLex
+  ( LogicalLine (..)
+  , collectContinuation
+  , logicalLines
+  , sortNub
+  , splitField
+  , splitSubstring
+  , trim
+  , trimCommas
+  )
+import Penance.CabalProject (CabalProject (..), parseCabalProject)
 import Penance.Json (Json (..))
 import qualified Penance.Json as Json
+import Penance.Json.Decode
+  ( asObject
+  , optionalArray
+  , optionalBoolMap
+  , optionalString
+  , rejectUnknown
+  , requiredArray
+  , requiredString
+  )
 import Penance.Skeleton
   ( BackpackSkeleton (..)
   , ExpectedInstantiation (..)
@@ -17,9 +37,18 @@ import Penance.Skeleton
   , IndefiniteUnit (..)
   , LocalComponent (..)
   , LocalPackage (..)
+  , ProjectKey
   , ProjectSkeleton (..)
   , encodeLocalPackage
   , encodeProjectSkeleton
+  , componentUnitKey
+  , mkComponentId
+  , mkModuleName
+  , mkPkgName
+  , planCacheKeyFromDigest
+  , projectKeyFromDigest
+  , renderProjectKey
+  , renderPkgName
   )
 import Penance.Types
   ( CompilerId (..)
@@ -63,12 +92,6 @@ data LocalPackageManifest = LocalPackageManifest
   }
   deriving (Eq, Ord, Show)
 
-data CabalProject = CabalProject
-  { projectPackages :: [String]
-  , projectSourceRepos :: [[(String, String)]]
-  }
-  deriving (Eq, Show)
-
 data CabalComponent = CabalComponent
   { cabalComponentId :: String
   , cabalComponentKind :: ComponentKind
@@ -88,17 +111,6 @@ data CabalPackage = CabalPackage
   }
   deriving (Eq, Show)
 
--- The @LocalComponent@, @LocalPackage@, @IndefiniteUnit@ and
--- @ExpectedInstantiation@ types now live in "Penance.Skeleton" — the single
--- source of truth shared with the native decoder.
-
-data LogicalLine = LogicalLine
-  { logicalNumber :: Int
-  , logicalIndent :: Int
-  , logicalText :: String
-  }
-  deriving (Eq, Show)
-
 data StanzaHeader
   = MainLibraryHeader
   | NamedComponentHeader ComponentKind String
@@ -115,37 +127,31 @@ normalizeProjectWorker input = do
     ("srcTreeDigest must be a blake3 digest, got `" ++ sourceDigest ++ "`")
   cabalProject <- parseCabalProject (inputCabalProjectText input)
   cabalPackages <- mapM parseManifest manifests
-  let localPackages = sortBy comparePackage (map localPackageFromCabal cabalPackages)
-      indefiniteUnits = sort (concatMap indefiniteUnitsFromPackage cabalPackages)
-      expectedInstantiations = sort (concatMap instantiationsFromPackage cabalPackages)
-      projectKey =
-        digestJson
-          (canonicalProjectJson input sourceDigest flags manifests localPackages cabalProject)
-      planCacheKey =
-        digestJson
-          ( planKeyJson
-              projectKey
-              (inputCompiler input)
-              (inputIndexState input)
-              (inputGranularity input)
-              flags
-              localPackages
-          )
+  parsedPackages <- mapM localPackageFromCabal cabalPackages
+  parsedInstantiations <- concat <$> mapM instantiationsFromPackage parsedPackages
+  let normalizedPackages = sortBy comparePackage parsedPackages
+      parsedIndefiniteUnits = sort (concatMap indefiniteUnitsFromPackage parsedPackages)
+      expectedInstantiationUnits = sort parsedInstantiations
+      projectKeyValue =
+        projectKeyFromDigest
+          (digestJson (canonicalProjectJson input flags normalizedPackages cabalProject))
+      planCacheKeyValue =
+        planCacheKeyFromDigest (digestJson (planKeyJson projectKeyValue))
   pure
     ( Json.renderJson
         ( encodeProjectSkeleton
             ProjectSkeleton
               { skeletonPath = "" -- native-only provenance; unused on the WASM side
-              , projectKey = projectKey
-              , localPackages = localPackages
+              , projectKey = projectKeyValue
+              , localPackages = normalizedPackages
               , sourceRepos = projectSourceRepos cabalProject
-              , planCacheKey = planCacheKey
+              , planCacheKey = planCacheKeyValue
               , plannerDrvInputs = []
               , granularity = inputGranularity input
               , backpack =
                   BackpackSkeleton
-                    { indefiniteUnits = indefiniteUnits
-                    , expectedInstantiations = expectedInstantiations
+                    { indefiniteUnits = parsedIndefiniteUnits
+                    , expectedInstantiations = expectedInstantiationUnits
                     }
               , expectedOutputs =
                   ExpectedOutputs
@@ -166,13 +172,13 @@ parseManifest manifest = parseCabalFile (manifestPath manifest) (manifestCabalTe
 comparePackage :: LocalPackage -> LocalPackage -> Ordering
 comparePackage left right =
   compare
-    (packageName left, packageVersion left, packageComponents left)
-    (packageName right, packageVersion right, packageComponents right)
+    (renderPkgName (packageName left), packageVersion left, packageComponents left)
+    (renderPkgName (packageName right), packageVersion right, packageComponents right)
 
 parseNormalizeInput :: String -> Either String NormalizeInput
 parseNormalizeInput text = do
   value <- mapLeft ("invalid input JSON: " ++) (Json.parseJson text)
-  fields <- expectObject "input" value
+  fields <- asObject "input" value
   rejectUnknown
     "input"
     [ "srcTreeDigest"
@@ -199,7 +205,7 @@ parseNormalizeInput text = do
 
 parseSourceManifestEntry :: Json -> Either String SourceManifestEntry
 parseSourceManifestEntry value = do
-  fields <- expectObject "sourceManifest entry" value
+  fields <- asObject "sourceManifest entry" value
   rejectUnknown "sourceManifest entry" ["path", "kind", "sha256"] fields
   SourceManifestEntry
     <$> requiredString "path" fields
@@ -208,7 +214,7 @@ parseSourceManifestEntry value = do
 
 parseLocalPackageManifest :: Json -> Either String LocalPackageManifest
 parseLocalPackageManifest value = do
-  fields <- expectObject "localPackageManifest" value
+  fields <- asObject "localPackageManifest" value
   rejectUnknown "localPackageManifest" ["path", "cabalText"] fields
   LocalPackageManifest
     <$> requiredString "path" fields
@@ -223,7 +229,7 @@ resolveSourceDigest input
         (inputSrcTreeDigest input)
   | otherwise = do
       normalized <- normalizeSourceManifest (inputSourceManifest input)
-      let computed = digestJson (Json.array (map sourceManifestJson normalized))
+      let computed = "blake3:" ++ renderBlake3Digest (digestJson (Json.array (map sourceManifestJson normalized)))
       case inputSrcTreeDigest input of
         Just provided
           | provided /= computed ->
@@ -268,68 +274,12 @@ normalizeFlags = sort . foldl insertNormalized [] . sort
       let normalized = map toLower (trim name)
        in (normalized, enabled) : filter ((/= normalized) . fst) flags
 
-parseCabalProject :: String -> Either String CabalProject
-parseCabalProject text = go (logicalLines text) [] []
-  where
-    go [] packages repos = Right (CabalProject (sortNub packages) (sort repos))
-    go (line : rest) packages repos
-      | logicalIndent line /= 0 = malformed line
-      | logicalText line == "source-repository-package" = do
-          (repo, remaining) <- parseSourceRepo rest []
-          go remaining packages (sort repo : repos)
-      | otherwise = do
-          (field, firstValue) <- splitField line
-          let (value, remaining) = collectContinuation (logicalIndent line) firstValue rest
-          case field of
-            "packages" -> go remaining (splitWords value ++ packages) repos
-            "optional-packages" -> go remaining (splitWords value ++ packages) repos
-            _
-              | field `elem` ignoredProjectFields -> go remaining packages repos
-              | otherwise ->
-                  Left
-                    ( "cabal.project line "
-                        ++ show (logicalNumber line)
-                        ++ ": unsupported cabal.project construct `"
-                        ++ field
-                        ++ "`"
-                    )
-      where
-        malformed bad =
-          Left
-            ( "cabal.project line "
-                ++ show (logicalNumber bad)
-                ++ ": expected `key: value`, got `"
-                ++ logicalText bad
-                ++ "`"
-            )
-    parseSourceRepo allLines fields =
-      case allLines of
-        [] -> Right (fields, [])
-        line : rest
-          | logicalIndent line == 0 -> Right (fields, allLines)
-          | otherwise -> do
-              (field, firstValue) <- splitField line
-              let (value, remaining) = collectContinuation (logicalIndent line) firstValue rest
-              parseSourceRepo remaining (insertField field value fields)
-
-ignoredProjectFields :: [String]
-ignoredProjectFields =
-  [ "constraints"
-  , "allow-newer"
-  , "allow-older"
-  , "with-compiler"
-  , "index-state"
-  , "repository"
-  , "remote-repo-cache"
-  , "jobs"
-  ]
-
 parseCabalFile :: String -> String -> Either String CabalPackage
 parseCabalFile path text = go (logicalLines text) [] []
   where
     go [] topFields components = finish topFields components
     go allLines@(line : rest) topFields components
-      | conditionalOrImport (logicalText line) = go rest topFields components
+      | conditionalOrImport (logicalText line) = unsupportedConditional path line
       | logicalIndent line /= 0 = malformed line
       | Just header <- parseStanzaHeader (logicalText line) = do
           (component, remaining) <- parseComponent path header rest []
@@ -338,7 +288,7 @@ parseCabalFile path text = go (logicalLines text) [] []
           go (skipStanza allLines) topFields components
       | looksLikeUnsupportedStanza (logicalText line) = unsupported line
       | otherwise = do
-          (field, firstValue) <- splitField line
+          (field, firstValue) <- splitField path line
           let (value, remaining) = collectContinuation (logicalIndent line) firstValue rest
           go remaining (appendField (map toLower field) value topFields) components
     finish fields components = do
@@ -369,7 +319,7 @@ parseComponent path header allLines fields =
   case allLines of
     [] -> finish []
     line : rest
-      | conditionalOrImport (logicalText line) -> parseComponent path header rest fields
+      | conditionalOrImport (logicalText line) -> unsupportedConditional path line
       | logicalIndent line == 0 -> finish allLines
       | parseStanzaHeader (logicalText line) /= Nothing || looksLikeUnsupportedStanza (logicalText line) ->
           Left
@@ -381,7 +331,7 @@ parseComponent path header allLines fields =
                 ++ "`"
             )
       | otherwise -> do
-          (field, firstValue) <- splitField line
+          (field, firstValue) <- splitField path line
           let (value, remaining) = collectContinuation (logicalIndent line) firstValue rest
           parseComponent path header remaining (appendField (map toLower field) value fields)
   where
@@ -448,60 +398,74 @@ eitherToMaybe value =
     Left _ -> Nothing
     Right result -> Just result
 
-localPackageFromCabal :: CabalPackage -> LocalPackage
-localPackageFromCabal package =
-  LocalPackage
-    { packageName = cabalPackageName package
+localPackageFromCabal :: CabalPackage -> Either String LocalPackage
+localPackageFromCabal package = do
+  parsedPackageName <- mkPkgName (cabalPackageName package)
+  parsedComponents <- mapM localComponentFromCabal (cabalPackageComponents package)
+  Right
+    LocalPackage
+    { packageName = parsedPackageName
     , packageVersion = cabalPackageVersion package
-    , packageComponents = sortNub (map cabalComponentId components)
-    , packageComponentDetails = sort (map localComponentFromCabal components)
-    , packageSignatures = sortNub (concatMap cabalSignatures components)
-    , packageRequiredSignatures = sortNub (concatMap cabalRequiredSignatures components)
-    , packageProvidedModules = sortNub (concatMap cabalProvidedModules components)
+    , packageComponents = sortNub (map componentName parsedComponents)
+    , packageComponentDetails = sort parsedComponents
+    , packageSignatures = sortNub (concatMap componentSignatures parsedComponents)
+    , packageRequiredSignatures = sortNub (concatMap componentRequiredSignatures parsedComponents)
+    , packageProvidedModules = sortNub (concatMap componentProvidedModules parsedComponents)
     }
-  where
-    components = cabalPackageComponents package
 
-localComponentFromCabal :: CabalComponent -> LocalComponent
-localComponentFromCabal component =
-  LocalComponent
-    { componentName = cabalComponentId component
+localComponentFromCabal :: CabalComponent -> Either String LocalComponent
+localComponentFromCabal component = do
+  parsedComponentName <- mkComponentId (cabalComponentId component)
+  parsedProvidedModules <- mapM mkModuleName (cabalProvidedModules component)
+  parsedSignatures <- mapM mkModuleName (cabalSignatures component)
+  parsedRequiredSignatures <- mapM mkModuleName (cabalRequiredSignatures component)
+  Right
+    LocalComponent
+    { componentName = parsedComponentName
     , componentKind = cabalComponentKind component
-    , componentProvidedModules = cabalProvidedModules component
-    , componentSignatures = cabalSignatures component
-    , componentRequiredSignatures = cabalRequiredSignatures component
+    , componentProvidedModules = parsedProvidedModules
+    , componentSignatures = parsedSignatures
+    , componentRequiredSignatures = parsedRequiredSignatures
     , componentMixins = cabalMixins component
     , componentReexportedModules = cabalReexportedModules component
     }
 
-indefiniteUnitsFromPackage :: CabalPackage -> [IndefiniteUnit]
+indefiniteUnitsFromPackage :: LocalPackage -> [IndefiniteUnit]
 indefiniteUnitsFromPackage package =
   [ IndefiniteUnit
-      { indefiniteUnit = cabalPackageName package ++ ":" ++ cabalComponentId component
-      , indefinitePackage = cabalPackageName package
-      , indefiniteComponent = cabalComponentId component
-      , indefiniteSignatures = cabalSignatures component
-      , indefiniteRequiredSignatures = cabalRequiredSignatures component
-      , indefiniteMixins = cabalMixins component
-      , indefiniteReexportedModules = cabalReexportedModules component
+      { indefiniteUnit = componentUnitKey (packageName package) (componentName component)
+      , indefinitePackage = packageName package
+      , indefiniteComponent = componentName component
+      , indefiniteSignatures = componentSignatures component
+      , indefiniteRequiredSignatures = componentRequiredSignatures component
+      , indefiniteMixins = componentMixins component
+      , indefiniteReexportedModules = componentReexportedModules component
       }
-  | component <- cabalPackageComponents package
-  , not (null (cabalRequiredSignatures component))
+  | component <- packageComponentDetails package
+  , not (null (componentRequiredSignatures component))
   ]
 
-instantiationsFromPackage :: CabalPackage -> [ExpectedInstantiation]
+instantiationsFromPackage :: LocalPackage -> Either String [ExpectedInstantiation]
 instantiationsFromPackage package =
-  concatMap fromComponent (cabalPackageComponents package)
+  concat <$> mapM fromComponent (packageComponentDetails package)
   where
-    fromComponent component =
-      [ ExpectedInstantiation
-          { instantiationUnit = cabalPackageName package ++ ":" ++ cabalComponentId component
-          , instantiationHoles = holes
-          }
-      | mixin <- cabalMixins component
-      , Just holes <- [holesFromMixin mixin]
-      , not (null holes)
-      ]
+    fromComponent component = concat <$> mapM (fromMixin component) (componentMixins component)
+    fromMixin component mixin =
+      case holesFromMixin mixin of
+        Nothing -> Right []
+        Just holes
+          | null holes -> Right []
+          | otherwise -> do
+              parsedHoles <- mapM parseHole holes
+              Right
+                [ ExpectedInstantiation
+                    { instantiationUnit = componentUnitKey (packageName package) (componentName component)
+                    , instantiationHoles = parsedHoles
+                    }
+                ]
+    parseHole (name, provider) = do
+      parsedName <- mkModuleName name
+      Right (parsedName, provider)
 
 holesFromMixin :: String -> Maybe [(String, String)]
 holesFromMixin mixin = do
@@ -517,34 +481,28 @@ holesFromMixin mixin = do
       | Just (provider, name) <- splitSubstring " as " entry = Just (trim name, trim provider)
       | otherwise = Nothing
 
-canonicalProjectJson :: NormalizeInput -> String -> [(String, Bool)] -> [LocalPackageManifest] -> [LocalPackage] -> CabalProject -> Json
-canonicalProjectJson input sourceDigest flags manifests localPackages cabalProject =
+canonicalProjectJson :: NormalizeInput -> [(String, Bool)] -> [LocalPackage] -> CabalProject -> Json
+canonicalProjectJson input flags normalizedPackages cabalProject =
   Json.object
-    [ ("srcTreeDigest", Json.string sourceDigest)
-    , ("compiler", Json.string (renderCompilerId (inputCompiler input)))
+    [ ("compiler", Json.string (renderCompilerId (inputCompiler input)))
     , ("indexState", Json.string (renderIndexState (inputIndexState input)))
-    , ("cabalProjectText", Json.string (inputCabalProjectText input))
-    , ("cabalProjectPackages", stringArray (projectPackages cabalProject))
-    , ("localPackageManifests", Json.array (map localPackageManifestJson manifests))
-    , ("localPackages", Json.array (map encodeLocalPackage localPackages))
+    , ( "cabalProjectPackages"
+      , Json.stringArray (sortNub (projectPackages cabalProject ++ projectOptionalPackages cabalProject))
+      )
+    , ("sourceRepos", Json.array (map stringMapJson (projectSourceRepos cabalProject)))
+    , ("localPackages", Json.array (map encodeLocalPackage normalizedPackages))
     , ("flags", boolMapJson flags)
     , ("materializationMode", Json.string (renderMaterializationMode (inputMaterializationMode input)))
     , ("granularity", Json.string (renderGranularity (inputGranularity input)))
     ]
 
-planKeyJson :: String -> CompilerId -> IndexState -> Granularity -> [(String, Bool)] -> [LocalPackage] -> Json
-planKeyJson projectKey compiler indexState granularity flags localPackages =
+planKeyJson :: ProjectKey -> Json
+planKeyJson key =
   Json.object
-    [ ("projectKey", Json.string projectKey)
-    , ("compiler", Json.string (renderCompilerId compiler))
-    , ("indexState", Json.string (renderIndexState indexState))
-    , ("granularity", Json.string (renderGranularity granularity))
-    , ("flags", boolMapJson flags)
-    , ("localPackages", Json.array (map encodeLocalPackage localPackages))
-    ]
+    [("projectKey", Json.string (renderProjectKey key))]
 
-digestJson :: Json -> String
-digestJson = ("blake3:" ++) . hashHex . Json.renderJson
+digestJson :: Json -> Blake3Digest
+digestJson = hash . Json.renderJson
 
 sourceManifestJson :: SourceManifestEntry -> Json
 sourceManifestJson entry =
@@ -554,48 +512,11 @@ sourceManifestJson entry =
     , ("sha256", Json.string (sourceSha256 entry))
     ]
 
-localPackageManifestJson :: LocalPackageManifest -> Json
-localPackageManifestJson manifest =
-  Json.object
-    [ ("path", Json.string (manifestPath manifest))
-    , ("cabalText", Json.string (manifestCabalText manifest))
-    ]
-
-stringArray :: [String] -> Json
-stringArray = Json.array . map Json.string
+stringMapJson :: [(String, String)] -> Json
+stringMapJson = Json.object . map (\(key, value) -> (key, Json.string value))
 
 boolMapJson :: [(String, Bool)] -> Json
 boolMapJson = Json.object . map (\(name, value) -> (name, Json.bool value)) . sort
-
-logicalLines :: String -> [LogicalLine]
-logicalLines text =
-  [ LogicalLine number (length (takeWhile isSpace uncommented)) (trim uncommented)
-  | (number, raw) <- zip [1 ..] (lines text)
-  , let uncommented = stripComment raw
-  , not (null (trim uncommented))
-  ]
-
-stripComment :: String -> String
-stripComment text = maybe text fst (splitSubstring "--" text)
-
-splitField :: LogicalLine -> Either String (String, String)
-splitField line =
-  case splitOnce ':' (logicalText line) of
-    Just (field, value) -> Right (trim field, trim value)
-    Nothing ->
-      Left
-        ( "line "
-            ++ show (logicalNumber line)
-            ++ ": expected `key: value`, got `"
-            ++ logicalText line
-            ++ "`"
-        )
-
-collectContinuation :: Int -> String -> [LogicalLine] -> (String, [LogicalLine])
-collectContinuation fieldIndent firstValue allLines =
-  let (continuation, remaining) = span ((> fieldIndent) . logicalIndent) allLines
-      values = filter (not . null) (trim firstValue : map (trim . logicalText) continuation)
-   in (intercalate "\n" values, remaining)
 
 conditionalOrImport :: String -> Bool
 conditionalOrImport text =
@@ -604,6 +525,17 @@ conditionalOrImport text =
         || value == "else"
         || "elif " `isPrefixOf` value
         || "import " `isPrefixOf` value
+
+unsupportedConditional :: String -> LogicalLine -> Either String a
+unsupportedConditional path line =
+  Left
+    ( path
+        ++ ": line "
+        ++ show (logicalNumber line)
+        ++ ": Cabal conditionals and common-stanza imports must be resolved by repent before normalization: `"
+        ++ logicalText line
+        ++ "`"
+    )
 
 shouldSkipTopLevelStanza :: String -> Bool
 shouldSkipTopLevelStanza text = lower (headWord text) `elem` ["flag", "common", "custom-setup", "source-repository"]
@@ -633,12 +565,6 @@ splitTopLevelCommas = filter (not . null) . map trim . go 0 ""
       | ch == ',' && depth == 0 = reverse current : go depth "" rest
       | otherwise = go depth (ch : current) rest
 
-splitWords :: String -> [String]
-splitWords = filter (not . null) . map trimCommas . words
-
-trimCommas :: String -> String
-trimCommas = dropWhile (== ',') . reverse . dropWhile (== ',') . reverse
-
 normalizePath :: String -> String
 normalizePath path =
   case dropDotSlash (trim path) of
@@ -662,75 +588,20 @@ appendField name value fields =
     Nothing -> (name, value) : fields
     Just existing -> (name, joinNonEmpty existing value) : filter ((/= name) . fst) fields
 
-insertField :: String -> String -> [(String, String)] -> [(String, String)]
-insertField name value fields = (name, value) : filter ((/= name) . fst) fields
-
 joinNonEmpty :: String -> String -> String
 joinNonEmpty left right
   | null left = right
   | null right = left
   | otherwise = left ++ "\n" ++ right
 
-expectObject :: String -> Json -> Either String [(String, Json)]
-expectObject _ (JsonObject fields) = Right fields
-expectObject context _ = Left (context ++ " must be a JSON object")
-
-requiredString :: String -> [(String, Json)] -> Either String String
-requiredString name fields =
-  case lookup name fields of
-    Just (JsonString value) -> Right value
-    Just _ -> Left ("input field `" ++ name ++ "` must be a string")
-    Nothing -> Left ("input is missing required field `" ++ name ++ "`")
-
 requiredParsed :: String -> (String -> Either String a) -> [(String, Json)] -> Either String a
 requiredParsed name parser fields = do
   value <- requiredString name fields
   mapLeft (\err -> "input field `" ++ name ++ "`: " ++ err) (parser value)
 
-optionalString :: String -> [(String, Json)] -> Either String (Maybe String)
-optionalString name fields =
-  case lookup name fields of
-    Nothing -> Right Nothing
-    Just JsonNull -> Right Nothing
-    Just (JsonString value) -> Right (Just value)
-    Just _ -> Left ("input field `" ++ name ++ "` must be a string or null")
-
-requiredArray :: String -> (Json -> Either String a) -> [(String, Json)] -> Either String [a]
-requiredArray name parser fields =
-  case lookup name fields of
-    Just (JsonArray values) -> mapM parser values
-    Just _ -> Left ("input field `" ++ name ++ "` must be an array")
-    Nothing -> Left ("input is missing required field `" ++ name ++ "`")
-
-optionalArray :: String -> (Json -> Either String a) -> [(String, Json)] -> Either String [a]
-optionalArray name parser fields =
-  case lookup name fields of
-    Nothing -> Right []
-    Just (JsonArray values) -> mapM parser values
-    Just _ -> Left ("input field `" ++ name ++ "` must be an array")
-
-optionalBoolMap :: String -> [(String, Json)] -> Either String [(String, Bool)]
-optionalBoolMap name fields =
-  case lookup name fields of
-    Nothing -> Right []
-    Just (JsonObject values) -> mapM parseBool values
-    Just _ -> Left ("input field `" ++ name ++ "` must be an object")
-  where
-    parseBool (key, JsonBool value) = Right (key, value)
-    parseBool (key, _) = Left ("input flag `" ++ key ++ "` must be a boolean")
-
-rejectUnknown :: String -> [String] -> [(String, Json)] -> Either String ()
-rejectUnknown context allowed fields =
-  case [name | (name, _) <- fields, name `notElem` allowed] of
-    name : _ -> Left (context ++ " contains unknown field `" ++ name ++ "`")
-    [] -> Right ()
-
 require :: Bool -> String -> Either String ()
 require True _ = Right ()
 require False message = Left message
-
-sortNub :: Ord a => [a] -> [a]
-sortNub = nub . sort
 
 lower :: String -> String
 lower = map toLower
@@ -742,9 +613,6 @@ safeHead :: [a] -> Maybe a
 safeHead [] = Nothing
 safeHead (value : _) = Just value
 
-trim :: String -> String
-trim = dropWhile isSpace . reverse . dropWhile isSpace . reverse
-
 removeSuffix :: String -> String -> String
 removeSuffix suffix value
   | reverse suffix `isPrefixOf` reverse value = reverse (drop (length suffix) (reverse value))
@@ -755,14 +623,6 @@ splitOnce delimiter value =
   case break (== delimiter) value of
     (_, []) -> Nothing
     (left, _ : right) -> Just (left, right)
-
-splitSubstring :: String -> String -> Maybe (String, String)
-splitSubstring needle = go ""
-  where
-    go _ [] = Nothing
-    go prefix rest
-      | needle `isPrefixOf` rest = Just (reverse prefix, drop (length needle) rest)
-      | ch : remaining <- rest = go (ch : prefix) remaining
 
 splitOn :: Char -> String -> [String]
 splitOn delimiter value =
@@ -790,7 +650,7 @@ runSelfTests = do
   second <- normalizeProjectWorker =<< parseNormalizeInput equivalentInput
   assertEqual "normalization determinism" first second
   parsed <- mapLeft ("self-test output JSON: " ++) (Json.parseJson first)
-  fields <- expectObject "self-test output" parsed
+  fields <- asObject "self-test output" parsed
   packages <- requiredArray "localPackages" Right fields
   require (length packages == 1) "self-test expected one local package"
   where
@@ -858,11 +718,11 @@ simpleCabal =
     , "name: simple-lib"
     , "version: 0.1.0.0"
     , "build-type: Simple"
-    , "license: MIT"
+    , "license: NONE"
     , ""
     , "library"
     , "  exposed-modules: Simple"
     , "  hs-source-dirs: src"
-    , "  build-depends: base >=4.18 && <5"
+    , "  build-depends: base >=4.20 && <5"
     , "  default-language: Haskell2010"
     ]

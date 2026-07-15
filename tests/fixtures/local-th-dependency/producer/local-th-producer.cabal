@@ -1,0 +1,12 @@
+cabal-version: 3.8
+name: local-th-producer
+version: 0.1.0.0
+build-type: Simple
+license: NONE
+
+library
+  exposed-modules: LocalTH.Producer
+  hs-source-dirs: src
+  build-depends:
+    base >=4.20 && <5
+  default-language: GHC2021

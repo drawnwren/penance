@@ -147,6 +147,14 @@ packages: ./$package_dir_name
 index-state: $index_state
 EOF
 
+"${PENANCE_REPENT_BIN:-repent}" \
+  --project "$project_dir" \
+  --compiler "$penance_compiler" \
+  --ghc-pkg "${PENANCE_GHC_PKG:-ghc-pkg}" \
+  --index-state "$index_state" \
+  --out "$project_dir/penance.lock" \
+  --hackage-nix-dir "$project_dir/nix/penance-hackage"
+
 cat >"$work_dir/flake.nix" <<EOF
 {
   inputs.penance.url = $nix_repo_url;
@@ -170,12 +178,12 @@ cat >"$work_dir/flake.nix" <<EOF
         penancePlanner = penance.packages.\${system}.plannerBin;
       };
       src = ./project;
-      penanceModule = (penanceLib.penanceProject {
+      penanceSurface = (penanceLib.penanceProject {
         inherit src;
         compiler = $nix_penance_compiler;
         index-state = $nix_index_state;
-        mode = "module";
-      }).drvGraph;
+        mode = "component";
+      }).surface;
       hackageProject = haskellNixPkgs.haskell-nix.cabalProject' {
         name = $nix_package_name;
         src = haskellNixPkgs.haskell-nix.cleanSourceHaskell {
@@ -251,7 +259,7 @@ cat >"$work_dir/flake.nix" <<EOF
     in
     {
       packages.\${system} = {
-        inherit haskellNixSurface penanceModule;
+        inherit haskellNixSurface penanceSurface;
       };
       checks.\${system}.surface-parity = pkgs.runCommand (packageName + "-surface-parity") {
         nativeBuildInputs = [
@@ -262,7 +270,7 @@ cat >"$work_dir/flake.nix" <<EOF
       } ''
         mkdir -p "\$out"
         \${penance.outPath}/scripts/validate-surface-parity.sh \\
-          \${penanceModule} \\
+          \${penanceSurface} \\
           \${haskellNixSurface} \\
           \${./project/$package_dir_name/$(basename "$cabal_file")} \\
           "\$out"

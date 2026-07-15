@@ -1,23 +1,36 @@
 module Penance.CabalPlan
   ( CabalPlanRequest (..)
+  , ResolvedPlan (..)
+  , LocalComponentUnit (..)
   , ExternalSource (..)
   , ExternalUnit (..)
   , HackageUrl (..)
   , SdistHash (..)
-  , resolveExternalUnits
+  , UnitId
+  , mkUnitId
+  , renderUnitId
+  , FlagAssignment
+  , flagAssignment
+  , renderFlagAssignment
+  , decodeResolvedPlan
+  , resolvePlan
   ) where
 
 import Control.Exception (bracket)
-import Control.Monad (foldM, unless)
+import Control.Monad (unless)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import Data.Char (digitToInt, isHexDigit)
-import Data.List (find, isInfixOf, nub, sortOn)
+import Data.List (isInfixOf, sortOn)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Distribution.Parsec (Parsec, simpleParsec)
 import Distribution.Pretty (prettyShow)
 import Distribution.Types.PackageName (PackageName)
 import Distribution.Version (Version)
 import Penance.Json (Json (..), parseJson)
+import Penance.Json.Decode (asObject, asString)
 import Penance.Types (CompilerId, IndexState, renderCompilerId, renderIndexState)
+import Penance.Utf8.IO (readUtf8File)
 import System.Directory
   ( canonicalizePath
   , createDirectory
@@ -36,14 +49,37 @@ data CabalPlanRequest = CabalPlanRequest
   , planGhcPkg :: FilePath
   , planCabal :: FilePath
   , planIndexState :: IndexState
+  , planConstraints :: [String]
   , planInput :: Maybe FilePath
   }
   deriving (Eq, Show)
 
 data ExternalUnit = ExternalUnit
-  { externalUnitName :: PackageName
+  { externalUnitId :: UnitId
+  , externalUnitName :: PackageName
   , externalUnitVersion :: Version
+  , externalUnitFlags :: FlagAssignment
+  , externalUnitComponent :: Maybe String
+  , externalUnitStyle :: String
   , externalUnitSource :: ExternalSource
+  , externalUnitDepends :: [UnitId]
+  , externalUnitExeDepends :: [UnitId]
+  , externalUnitInstantiatedWith :: [(String, UnitId)]
+  }
+  deriving (Eq, Show)
+
+data LocalComponentUnit = LocalComponentUnit
+  { localUnitId :: UnitId
+  , localUnitPackageName :: PackageName
+  , localUnitComponent :: String
+  , localUnitExternalDepends :: [UnitId]
+  , localUnitExternalExeDepends :: [UnitId]
+  }
+  deriving (Eq, Show)
+
+data ResolvedPlan = ResolvedPlan
+  { resolvedExternalUnits :: [ExternalUnit]
+  , resolvedLocalComponents :: [LocalComponentUnit]
   }
   deriving (Eq, Show)
 
@@ -61,8 +97,30 @@ newtype HackageUrl = HackageUrl {renderHackageUrl :: String}
 newtype SdistHash = SdistHash {renderSdistHash :: String}
   deriving (Eq, Ord, Show)
 
-newtype PlanUnitId = PlanUnitId {renderPlanUnitId :: String}
+newtype UnitId = UnitId String
   deriving (Eq, Ord, Show)
+
+mkUnitId :: String -> Either String UnitId
+mkUnitId value
+  | null value = Left "plan.json unit id must not be empty"
+  | otherwise = Right (UnitId value)
+
+renderUnitId :: UnitId -> String
+renderUnitId (UnitId value) = value
+
+newtype FlagAssignment = FlagAssignment [(String, Bool)]
+  deriving (Eq, Ord, Show)
+
+flagAssignment :: [(String, Bool)] -> Either String FlagAssignment
+flagAssignment entries = do
+  let ordered = sortOn fst entries
+      names = map fst ordered
+  unlessEither (all (not . null) names) "plan.json flag names must not be empty"
+  unlessEither (length names == Set.size (Set.fromList names)) "plan.json flag assignment contains duplicate names"
+  pure (FlagAssignment ordered)
+
+renderFlagAssignment :: FlagAssignment -> [(String, Bool)]
+renderFlagAssignment (FlagAssignment entries) = entries
 
 newtype RepositoryUri = RepositoryUri {renderRepositoryUri :: String}
   deriving (Eq, Ord, Show)
@@ -72,29 +130,43 @@ newtype HexSha256 = HexSha256 {renderHexSha256 :: String}
 
 data PlanUnitOrigin
   = LocalPlanUnit
-  | HackagePlanUnit RepositoryUri HexSha256
+  | HackagePlanUnit String RepositoryUri HexSha256
   | PreExistingPlanUnit
   deriving (Eq, Show)
 
-data PlanUnit = PlanUnit
-  { unitId :: PlanUnitId
-  , unitPackageName :: PackageName
-  , unitPackageVersion :: Version
-  , unitOrigin :: PlanUnitOrigin
-  , unitDependencies :: [PlanUnitId]
+data PlanComponent = PlanComponent
+  { planComponentName :: String
+  , planComponentDependencies :: [UnitId]
+  , planComponentExecutableDependencies :: [UnitId]
   }
   deriving (Eq, Show)
 
-resolveExternalUnits :: CabalPlanRequest -> IO (Either String [ExternalUnit])
-resolveExternalUnits request = do
+data PlanUnit = PlanUnit
+  { unitId :: UnitId
+  , unitPackageName :: PackageName
+  , unitPackageVersion :: Version
+  , unitFlags :: FlagAssignment
+  , unitComponent :: Maybe String
+  , unitOrigin :: PlanUnitOrigin
+  , unitDependencies :: [UnitId]
+  , unitExecutableDependencies :: [UnitId]
+  , unitInstantiatedWith :: [(String, UnitId)]
+  , unitComponents :: [PlanComponent]
+  }
+  deriving (Eq, Show)
+
+resolvePlan :: CabalPlanRequest -> IO (Either String ResolvedPlan)
+resolvePlan request = do
   contents <-
     case planInput request of
       Just path -> readStrictFile path
       Nothing -> generatePlanJson request
-  pure $ do
-    units <- decodePlan (planCompiler request) contents
-    planned <- externalPlanClosure units
-    traverse externalUnitFromPlan planned >>= coalesceExternalUnits
+  pure (decodeResolvedPlan (planCompiler request) contents)
+
+decodeResolvedPlan :: CompilerId -> String -> Either String ResolvedPlan
+decodeResolvedPlan compiler contents = do
+  units <- decodePlan compiler contents
+  externalPlanClosure units
 
 generatePlanJson :: CabalPlanRequest -> IO String
 generatePlanJson request =
@@ -116,6 +188,7 @@ generatePlanJson request =
           , "--with-compiler=" ++ ghc
           , "--with-hc-pkg=" ++ planGhcPkg request
           ]
+            ++ map ("--constraint=" ++) (planConstraints request)
     (status, stdout, stderr) <- readProcessWithExitCode (planCabal request) args ""
     case status of
       ExitSuccess -> readStrictFile planPath
@@ -130,7 +203,7 @@ generatePlanJson request =
 
 decodePlan :: CompilerId -> String -> Either String [PlanUnit]
 decodePlan expectedCompiler contents = do
-  root <- parseJson contents >>= expectObject "plan.json"
+  root <- parseJson contents >>= asObject "plan.json"
   _cabalVersion <- stringField "cabal-version" root
   compiler <- stringField "compiler-id" root
   unlessEither
@@ -146,32 +219,53 @@ decodePlan expectedCompiler contents = do
 
 decodePlanUnit :: Json -> Either String PlanUnit
 decodePlanUnit value = do
-  fields <- expectObject "install-plan unit" value
+  fields <- asObject "install-plan unit" value
   unitType <- stringField "type" fields
-  identifier <- PlanUnitId <$> stringField "id" fields
+  identifier <- stringField "id" fields >>= mkUnitId
   packageName <- parsedField "pkg-name" fields
   packageVersion <- parsedField "pkg-version" fields
+  flags <- optionalBoolObjectField "flags" fields >>= flagAssignment
+  component <- optionalStringField "component-name" fields
   depends <- optionalStringArrayField "depends" fields
   executableDepends <- optionalStringArrayField "exe-depends" fields
-  components <- optionalObjectField "components" fields
-  componentDepends <- concat <$> traverse componentDependencies (map snd components)
+  instantiatedWith <- optionalStringObjectField "instantiated-with" fields
+  components <- optionalObjectField "components" fields >>= traverse decodePlanComponent
   origin <- decodeOrigin unitType fields
+  directDependencies <- traverse mkUnitId depends
+  directExecutableDependencies <- traverse mkUnitId executableDepends
+  instantiations <-
+    traverse
+      (\(name, target) -> fmap (\targetUnitId -> (name, targetUnitId)) (mkUnitId target))
+      instantiatedWith
+  let dependencies = canonicalUnitIds (directDependencies ++ concatMap planComponentDependencies components)
+      executableDependencies =
+        canonicalUnitIds
+          (directExecutableDependencies ++ concatMap planComponentExecutableDependencies components)
   pure
     PlanUnit
       { unitId = identifier
       , unitPackageName = packageName
       , unitPackageVersion = packageVersion
+      , unitFlags = flags
+      , unitComponent = component
       , unitOrigin = origin
-      , unitDependencies =
-          nub (map PlanUnitId (depends ++ executableDepends ++ componentDepends))
+      , unitDependencies = dependencies
+      , unitExecutableDependencies = executableDependencies
+      , unitInstantiatedWith = sortOn fst instantiations
+      , unitComponents = sortOn planComponentName components
       }
 
-componentDependencies :: Json -> Either String [String]
-componentDependencies value = do
-  fields <- expectObject "install-plan component" value
-  depends <- optionalStringArrayField "depends" fields
-  executableDepends <- optionalStringArrayField "exe-depends" fields
-  pure (depends ++ executableDepends)
+decodePlanComponent :: (String, Json) -> Either String PlanComponent
+decodePlanComponent (name, value) = do
+  fields <- asObject "install-plan component" value
+  dependencies <- optionalStringArrayField "depends" fields >>= traverse mkUnitId
+  executableDependencies <- optionalStringArrayField "exe-depends" fields >>= traverse mkUnitId
+  pure
+    PlanComponent
+      { planComponentName = name
+      , planComponentDependencies = canonicalUnitIds dependencies
+      , planComponentExecutableDependencies = canonicalUnitIds executableDependencies
+      }
 
 decodeOrigin :: String -> [(String, Json)] -> Either String PlanUnitOrigin
 decodeOrigin unitType fields =
@@ -181,12 +275,12 @@ decodeOrigin unitType fields =
       style <- stringField "style" fields
       case style of
         "local" -> Right LocalPlanUnit
-        "global" -> decodeRepositorySource fields
+        "global" -> decodeRepositorySource style fields
         _ -> Left ("unsupported configured-unit style in plan.json: `" ++ style ++ "`")
     _ -> Left ("unsupported install-plan unit type: `" ++ unitType ++ "`")
 
-decodeRepositorySource :: [(String, Json)] -> Either String PlanUnitOrigin
-decodeRepositorySource fields = do
+decodeRepositorySource :: String -> [(String, Json)] -> Either String PlanUnitOrigin
+decodeRepositorySource style fields = do
   source <- objectField "pkg-src" fields
   sourceType <- stringField "type" source
   unlessEither
@@ -195,76 +289,123 @@ decodeRepositorySource fields = do
   repository <- objectField "repo" source
   uri <- RepositoryUri <$> stringField "uri" repository
   sha256 <- HexSha256 <$> stringField "pkg-src-sha256" fields
-  pure (HackagePlanUnit uri sha256)
+  pure (HackagePlanUnit style uri sha256)
 
-externalPlanClosure :: [PlanUnit] -> Either String [PlanUnit]
+externalPlanClosure :: [PlanUnit] -> Either String ResolvedPlan
 externalPlanClosure units =
-  walk [] [] roots
+  finish =<< walk Set.empty [] roots
   where
+    unitsById = Map.fromList [(unitId unit, unit) | unit <- units]
     roots =
-      nub
+      Set.toAscList . Set.fromList $
         [ dependency
         | unit <- units
         , unitOrigin unit == LocalPlanUnit
-        , dependency <- unitDependencies unit
+        , dependency <- unitDependencies unit ++ unitExecutableDependencies unit
         ]
 
     walk _ selected [] = Right selected
     walk visited selected (identifier : remaining)
-      | identifier `elem` visited = walk visited selected remaining
+      | Set.member identifier visited = walk visited selected remaining
       | otherwise =
-          case find ((== identifier) . unitId) units of
-            Nothing -> Left ("plan.json references missing unit `" ++ renderPlanUnitId identifier ++ "`")
+          case Map.lookup identifier unitsById of
+            Nothing -> Left ("plan.json references missing unit `" ++ renderUnitId identifier ++ "`")
             Just unit ->
               case unitOrigin unit of
                 LocalPlanUnit ->
-                  walk (identifier : visited) selected (unitDependencies unit ++ remaining)
+                  walk (Set.insert identifier visited) selected (allDependencies unit ++ remaining)
                 PreExistingPlanUnit ->
-                  walk (identifier : visited) (unit : selected) remaining
-                HackagePlanUnit _ _ ->
                   walk
-                    (identifier : visited)
+                    (Set.insert identifier visited)
                     (unit : selected)
-                    (unitDependencies unit ++ remaining)
+                    (allDependencies unit ++ remaining)
+                HackagePlanUnit _ _ _ ->
+                  walk
+                    (Set.insert identifier visited)
+                    (unit : selected)
+                    (allDependencies unit ++ remaining)
+
+    allDependencies unit = unitDependencies unit ++ unitExecutableDependencies unit
+
+    finish selected = do
+      externalUnits <- traverse externalUnitFromPlan (sortOn unitId selected)
+      let externalIds = Set.fromList (map externalUnitId externalUnits)
+      locals <-
+        concat
+          <$> traverse
+            (localComponentsFromPlan externalIds)
+            (filter ((== LocalPlanUnit) . unitOrigin) units)
+      pure
+        ResolvedPlan
+          { resolvedExternalUnits = externalUnits
+          , resolvedLocalComponents = sortOn (\unit -> (localUnitPackageName unit, localUnitComponent unit)) locals
+          }
+
+localComponentsFromPlan :: Set.Set UnitId -> PlanUnit -> Either String [LocalComponentUnit]
+localComponentsFromPlan externalIds unit =
+  case (unitComponent unit, unitComponents unit) of
+    (Just component, []) ->
+      Right [localComponent component (unitDependencies unit) (unitExecutableDependencies unit)]
+    (Nothing, components@(_ : _)) ->
+      Right
+        [ localComponent
+            (planComponentName component)
+            (planComponentDependencies component)
+            (planComponentExecutableDependencies component)
+        | component <- components
+        ]
+    (Just _, _ : _) ->
+      Left ("local plan unit `" ++ identifier ++ "` has both component-name and components")
+    (Nothing, []) ->
+      Left ("local plan unit `" ++ identifier ++ "` has neither component-name nor components")
+  where
+    identifier = renderUnitId (unitId unit)
+    localComponent component dependencies executableDependencies =
+      LocalComponentUnit
+        { localUnitId = unitId unit
+        , localUnitPackageName = unitPackageName unit
+        , localUnitComponent = component
+        , localUnitExternalDepends = filter (`Set.member` externalIds) dependencies
+        , localUnitExternalExeDepends = filter (`Set.member` externalIds) executableDependencies
+        }
+
+canonicalUnitIds :: [UnitId] -> [UnitId]
+canonicalUnitIds = Set.toAscList . Set.fromList
 
 externalUnitFromPlan :: PlanUnit -> Either String ExternalUnit
 externalUnitFromPlan unit = do
   source <-
     case unitOrigin unit of
       PreExistingPlanUnit -> Right GhcBoot
-      HackagePlanUnit repository sha256 ->
+      HackagePlanUnit _ repository sha256 ->
         HackageSdist
           <$> hackageTarballUrl repository (unitPackageName unit) (unitPackageVersion unit)
           <*> (SdistHash <$> sha256Sri sha256)
       LocalPlanUnit -> Left "internal error: local unit escaped the external plan closure"
   pure
     ExternalUnit
-      { externalUnitName = unitPackageName unit
+      { externalUnitId = unitId unit
+      , externalUnitName = unitPackageName unit
       , externalUnitVersion = unitPackageVersion unit
+      , externalUnitFlags = unitFlags unit
+      , externalUnitComponent = unitComponent unit
+      , externalUnitStyle =
+          case unitOrigin unit of
+            HackagePlanUnit style _ _ -> style
+            PreExistingPlanUnit -> "global"
+            LocalPlanUnit -> "local"
       , externalUnitSource = source
+      , externalUnitDepends = unitDependencies unit
+      , externalUnitExeDepends = unitExecutableDependencies unit
+      , externalUnitInstantiatedWith = unitInstantiatedWith unit
       }
-
-coalesceExternalUnits :: [ExternalUnit] -> Either String [ExternalUnit]
-coalesceExternalUnits = foldM insert [] . sortOn (prettyShow . externalUnitName)
-  where
-    insert units candidate =
-      case find ((== externalUnitName candidate) . externalUnitName) units of
-        Nothing -> Right (units ++ [candidate])
-        Just existing
-          | existing == candidate -> Right units
-          | otherwise ->
-              Left
-                ( "penance/lock/1 cannot represent multiple planned instances of `"
-                    ++ prettyShow (externalUnitName candidate)
-                    ++ "`"
-                )
 
 hackageTarballUrl :: RepositoryUri -> PackageName -> Version -> Either String HackageUrl
 hackageTarballUrl repository name version = do
   let uri = renderRepositoryUri repository
   unlessEither
     ("hackage.haskell.org" `isInfixOf` uri)
-    ("penance/lock/1 cannot represent non-Hackage repository `" ++ uri ++ "`")
+    ("penance/lock/2 cannot represent non-Hackage repository `" ++ uri ++ "`")
   let packageId = prettyShow name ++ "-" ++ prettyShow version
   pure . HackageUrl $
     "https://hackage.haskell.org/package/"
@@ -315,10 +456,6 @@ base64Digit :: Int -> Char
 base64Digit index =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" !! index
 
-expectObject :: String -> Json -> Either String [(String, Json)]
-expectObject _ (JsonObject fields) = Right fields
-expectObject context _ = Left (context ++ " must be a JSON object")
-
 arrayField :: String -> [(String, Json)] -> Either String [Json]
 arrayField name fields =
   case lookup name fields of
@@ -340,6 +477,35 @@ optionalObjectField name fields =
     Just (JsonObject value) -> Right value
     Just _ -> Left ("plan.json field `" ++ name ++ "` must be an object")
 
+optionalStringField :: String -> [(String, Json)] -> Either String (Maybe String)
+optionalStringField name fields =
+  case lookup name fields of
+    Nothing -> Right Nothing
+    Just JsonNull -> Right Nothing
+    Just (JsonString value) -> Right (Just value)
+    Just _ -> Left ("plan.json field `" ++ name ++ "` must be a string or null")
+
+optionalBoolObjectField :: String -> [(String, Json)] -> Either String [(String, Bool)]
+optionalBoolObjectField name fields =
+  case lookup name fields of
+    Nothing -> Right []
+    Just (JsonObject entries) -> traverse parseEntry entries
+    Just _ -> Left ("plan.json field `" ++ name ++ "` must be an object")
+  where
+    parseEntry (key, JsonBool value) = Right (key, value)
+    parseEntry (key, _) = Left ("plan.json flag `" ++ key ++ "` must be boolean")
+
+optionalStringObjectField :: String -> [(String, Json)] -> Either String [(String, String)]
+optionalStringObjectField name fields =
+  case lookup name fields of
+    Nothing -> Right []
+    Just JsonNull -> Right []
+    Just (JsonObject entries) -> traverse parseEntry entries
+    Just _ -> Left ("plan.json field `" ++ name ++ "` must be an object or null")
+  where
+    parseEntry (key, JsonString value) = Right (key, value)
+    parseEntry (key, _) = Left ("plan.json field `" ++ name ++ "." ++ key ++ "` must be a string")
+
 stringField :: String -> [(String, Json)] -> Either String String
 stringField name fields =
   case lookup name fields of
@@ -358,11 +524,10 @@ optionalStringArrayField :: String -> [(String, Json)] -> Either String [String]
 optionalStringArrayField name fields =
   case lookup name fields of
     Nothing -> Right []
-    Just (JsonArray values) -> traverse asString values
+    Just (JsonArray values) -> traverse parseString values
     Just _ -> Left ("plan.json field `" ++ name ++ "` must be an array")
   where
-    asString (JsonString value) = Right value
-    asString _ = Left ("plan.json field `" ++ name ++ "` must contain only strings")
+    parseString value = asString ("plan.json field `" ++ name ++ "` item") value
 
 unlessEither :: Bool -> String -> Either String ()
 unlessEither condition message =
@@ -370,7 +535,7 @@ unlessEither condition message =
 
 readStrictFile :: FilePath -> IO String
 readStrictFile path = do
-  contents <- readFile path
+  contents <- readUtf8File path
   length contents `seq` pure contents
 
 withTemporaryDirectory :: String -> (FilePath -> IO a) -> IO a

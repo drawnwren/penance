@@ -60,7 +60,7 @@ rows.
 Results are written under:
 
 ```text
-docs/bench-results/architecture/<system>-<timestamp>/
+.penance/bench-results/architecture/<system>-<timestamp>/
   metrics.tsv
   metrics.jsonl
   summary.json
@@ -150,7 +150,7 @@ copy the local flake to a temporary worktree, run a baseline
 diff the derivation sets. Dyndrv cutoff scenarios opt into `dyndrv-build-log`
 mode: they warm a real baseline build, apply the edit, run a real edited build,
 and assert the exact planner/module/assemble events observed in that edited
-build log. Rows with a non-null `expectedMaxRebuiltDrvs` fail when the edited
+build log. Rows with a non-null `expectedMaxRebuildEvents` fail when the edited
 count exceeds that bound; rows with `expectedRebuiltNames` also fail on any
 missing or extra event. Rows without a bound are marked `failing` so current
 rebuild counts are visible while the matching cutoff mechanism is still absent.
@@ -160,7 +160,7 @@ remain hard failures.
 Results are written under:
 
 ```text
-docs/bench-results/rebuild-scenarios/<system>-<timestamp>/
+.penance/bench-results/rebuild-scenarios/<system>-<timestamp>/
   metrics.tsv
   metrics.jsonl
   summary.json
@@ -194,12 +194,12 @@ output, and confirms both intentionally corrupt child JSON and a corrupted
 | Phase | State | Penance target | haskell.nix target | Meaning today |
 |---|---|---|---|---|
 | M0 primitives | `comparison` | `penancePrimitiveProbes` | `haskellNixPrimitiveProbes` | committed Nix primitive probes and derivation show/add round-trips |
-| M1 lock | `comparison` | `repentBench` | `haskellNixBenchPlan` | committed benchmark and StateVar external-dependency `penance.lock` checks versus haskell.nix generated plan output |
+| M1 lock | `comparison` | `repentBenchPlan` | `haskellNixBenchPlan` | one checked benchmark lock solve versus one haskell.nix generated plan output; the multi-case lock proof remains `checks.repent-lock-proof` |
 | M2 static simple | `comparison` | `penanceSimpleLibViaLock` | `haskellNixSimpleLib` | lock-built `simple-lib` component from `penanceProject`, with GHC-Wasm-canonicalized `iface`, real object/archive `out`, and composed package DB outputs |
 | M2 static bench | `comparison` | `penanceBenchViaLock` | `haskellNixBenchExe` | lock-built benchmark executable from `penanceProject`, compiling against `dbIface`, linking against `dbFull`, and smoke-testing generated output |
 | M4 module bench | `comparison` | `penanceBenchDyndrv` | `haskellNixBenchExe` | content-addressed recursive-Nix planner emitting per-module dynamic derivations plus final assembly; exact rebuild cutoff is enforced by M4 rebuild-scenarios rows |
 | M5 Backpack | `comparison` | `penanceBackpackReal` | `haskellNixBackpackExe` | real Backpack build with two concrete instantiations |
-| M6 cross | `comparison` | `penanceAarch64LinuxReal` | `haskellNixAarch64LinuxBaseline` | raw fixed aarch64-linux ELF probe versus the haskell.nix-overlay cross stdenv probe; Haskell project cross parity is covered by `HN-project-cross` |
+| M6 cross | `comparison` | `penanceHaskellAarch64LinuxReal` | `haskellNixProjectCrossAarch64` | the same Haskell executable compiled for aarch64-linux with the same cross GHC: direct compiler invocation versus haskell.nix `projectCross` and Cabal Setup machinery |
 | M7 MSC | `comparison` | `penanceMscBundle` | `haskellNixMscBundle` | closureInfo-backed bundle artifacts and closure manifests |
 | M7 warp | `comparison` | `penanceWarpLoop` | `haskellNixWarpBaseline` | device-cache closure manifest plus managed-service hot-swap symlink |
 
@@ -242,8 +242,8 @@ M2 static unit cutoff:
 M1 lock:
 
 - canonical `penance.lock` golden test for the benchmark fixture
-- schema-1 external unit metadata for the StateVar fixture, including the
-  Hackage sdist hash and GHC boot-library markers
+- schema-2 unit metadata for the StateVar fixture, including unit IDs, complete
+  flags and edges, the Hackage sdist hash, and GHC boot-library markers
 - deterministic repeated lock generation for the external fixture
 - stale-lock rejection when the fixture dependency set changes
 - explicit `project.pathBase = "project-root"` metadata for lock-local paths

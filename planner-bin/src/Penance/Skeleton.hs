@@ -1,5 +1,25 @@
 module Penance.Skeleton
   ( ProjectSkeleton (..)
+  , ProjectKey
+  , PlanCacheKey
+  , projectKeyFromDigest
+  , planCacheKeyFromDigest
+  , renderProjectKey
+  , renderPlanCacheKey
+  , PkgName
+  , ComponentId
+  , ModuleName
+  , UnitKey
+  , mkPkgName
+  , mkComponentId
+  , mkModuleName
+  , parseUnitKey
+  , componentUnitKey
+  , moduleUnitKey
+  , renderPkgName
+  , renderComponentId
+  , renderModuleName
+  , renderUnitKey
   , LocalPackage (..)
   , LocalComponent (..)
   , BackpackSkeleton (..)
@@ -12,8 +32,10 @@ module Penance.Skeleton
   , encodeLocalPackage
   ) where
 
-import Data.List (sort)
+import Data.List (sort, stripPrefix)
+import Penance.Blake3 (Blake3Digest, parseBlake3Digest, renderBlake3Digest)
 import Penance.Json (Json (..))
+import qualified Penance.Json.Decode as Decode
 import Penance.Types
   ( ComponentKind
   , Granularity
@@ -25,10 +47,10 @@ import Penance.Types
 
 data ProjectSkeleton = ProjectSkeleton
   { skeletonPath :: FilePath
-  , projectKey :: String
+  , projectKey :: ProjectKey
   , localPackages :: [LocalPackage]
   , sourceRepos :: [[(String, String)]]
-  , planCacheKey :: String
+  , planCacheKey :: PlanCacheKey
   , plannerDrvInputs :: [String]
   , granularity :: Granularity
   , backpack :: BackpackSkeleton
@@ -36,23 +58,41 @@ data ProjectSkeleton = ProjectSkeleton
   }
   deriving (Eq, Show)
 
+newtype ProjectKey = ProjectKey Blake3Digest
+  deriving (Eq, Ord, Show)
+
+newtype PlanCacheKey = PlanCacheKey Blake3Digest
+  deriving (Eq, Ord, Show)
+
+projectKeyFromDigest :: Blake3Digest -> ProjectKey
+projectKeyFromDigest = ProjectKey
+
+planCacheKeyFromDigest :: Blake3Digest -> PlanCacheKey
+planCacheKeyFromDigest = PlanCacheKey
+
+renderProjectKey :: ProjectKey -> String
+renderProjectKey (ProjectKey digest) = "blake3:" ++ renderBlake3Digest digest
+
+renderPlanCacheKey :: PlanCacheKey -> String
+renderPlanCacheKey (PlanCacheKey digest) = "blake3:" ++ renderBlake3Digest digest
+
 data LocalPackage = LocalPackage
-  { packageName :: String
+  { packageName :: PkgName
   , packageVersion :: String
-  , packageComponents :: [String]
+  , packageComponents :: [ComponentId]
   , packageComponentDetails :: [LocalComponent]
-  , packageSignatures :: [String]
-  , packageRequiredSignatures :: [String]
-  , packageProvidedModules :: [String]
+  , packageSignatures :: [ModuleName]
+  , packageRequiredSignatures :: [ModuleName]
+  , packageProvidedModules :: [ModuleName]
   }
   deriving (Eq, Ord, Show)
 
 data LocalComponent = LocalComponent
-  { componentName :: String
+  { componentName :: ComponentId
   , componentKind :: ComponentKind
-  , componentProvidedModules :: [String]
-  , componentSignatures :: [String]
-  , componentRequiredSignatures :: [String]
+  , componentProvidedModules :: [ModuleName]
+  , componentSignatures :: [ModuleName]
+  , componentRequiredSignatures :: [ModuleName]
   , componentMixins :: [String]
   , componentReexportedModules :: [String]
   }
@@ -65,19 +105,19 @@ data BackpackSkeleton = BackpackSkeleton
   deriving (Eq, Show)
 
 data IndefiniteUnit = IndefiniteUnit
-  { indefiniteUnit :: String
-  , indefinitePackage :: String
-  , indefiniteComponent :: String
-  , indefiniteSignatures :: [String]
-  , indefiniteRequiredSignatures :: [String]
+  { indefiniteUnit :: UnitKey
+  , indefinitePackage :: PkgName
+  , indefiniteComponent :: ComponentId
+  , indefiniteSignatures :: [ModuleName]
+  , indefiniteRequiredSignatures :: [ModuleName]
   , indefiniteMixins :: [String]
   , indefiniteReexportedModules :: [String]
   }
   deriving (Eq, Ord, Show)
 
 data ExpectedInstantiation = ExpectedInstantiation
-  { instantiationUnit :: String
-  , instantiationHoles :: [(String, String)]
+  { instantiationUnit :: UnitKey
+  , instantiationHoles :: [(ModuleName, String)]
   }
   deriving (Eq, Ord, Show)
 
@@ -88,12 +128,62 @@ data ExpectedOutputs = ExpectedOutputs
   }
   deriving (Eq, Show)
 
+newtype PkgName = PkgName String
+  deriving (Eq, Ord, Show)
+
+newtype ComponentId = ComponentId String
+  deriving (Eq, Ord, Show)
+
+newtype ModuleName = ModuleName String
+  deriving (Eq, Ord, Show)
+
+newtype UnitKey = UnitKey String
+  deriving (Eq, Ord, Show)
+
+mkPkgName :: String -> Either String PkgName
+mkPkgName = fmap PkgName . validateName "package name"
+
+mkComponentId :: String -> Either String ComponentId
+mkComponentId = fmap ComponentId . validateName "component ID"
+
+mkModuleName :: String -> Either String ModuleName
+mkModuleName = fmap ModuleName . validateName "module name"
+
+parseUnitKey :: String -> Either String UnitKey
+parseUnitKey = fmap UnitKey . validateName "unit key"
+
+componentUnitKey :: PkgName -> ComponentId -> UnitKey
+componentUnitKey package component =
+  UnitKey (renderPkgName package ++ ":" ++ renderComponentId component)
+
+moduleUnitKey :: UnitKey -> ModuleName -> UnitKey
+moduleUnitKey unit moduleName =
+  UnitKey (renderUnitKey unit ++ ":" ++ renderModuleName moduleName)
+
+renderPkgName :: PkgName -> String
+renderPkgName (PkgName name) = name
+
+renderComponentId :: ComponentId -> String
+renderComponentId (ComponentId component) = component
+
+renderModuleName :: ModuleName -> String
+renderModuleName (ModuleName moduleName) = moduleName
+
+renderUnitKey :: UnitKey -> String
+renderUnitKey (UnitKey key) = key
+
+validateName :: String -> String -> Either String String
+validateName label value
+  | null value = Left (label ++ " must not be empty")
+  | '\0' `elem` value = Left (label ++ " must not contain NUL")
+  | otherwise = Right value
+
 encodeProjectSkeleton :: ProjectSkeleton -> Json
 encodeProjectSkeleton = JsonObject . codecEnc projectSkeletonCodec
 
 decodeProjectSkeleton :: FilePath -> Json -> Either String ProjectSkeleton
 decodeProjectSkeleton path value = do
-  fields <- asObject "ProjectSkeleton" value
+  fields <- Decode.asObject "ProjectSkeleton" value
   mk <- codecDec projectSkeletonCodec fields
   Right (mk path)
 
@@ -148,6 +238,18 @@ vgranularity = vstringVia renderGranularity parseGranularity
 vcomponentKind :: Value ComponentKind
 vcomponentKind = vstringVia renderComponentKind parseComponentKind
 
+vpkgName :: Value PkgName
+vpkgName = vstringVia renderPkgName mkPkgName
+
+vcomponentId :: Value ComponentId
+vcomponentId = vstringVia renderComponentId mkComponentId
+
+vmoduleName :: Value ModuleName
+vmoduleName = vstringVia renderModuleName mkModuleName
+
+vunitKey :: Value UnitKey
+vunitKey = vstringVia renderUnitKey parseUnitKey
+
 vbool :: Value Bool
 vbool =
   Value JsonBool $ \key value ->
@@ -176,6 +278,20 @@ vstringMap =
     decodeEntry (name, JsonString v) = Right (name, v)
     decodeEntry (name, _) = Left ("expected string value in object field `" ++ name ++ "`")
 
+vmoduleStringMap :: Value [(ModuleName, String)]
+vmoduleStringMap =
+  Value encodePairs $ \key value ->
+    case value of
+      JsonObject entries -> traverse decodeEntry entries
+      other -> Left ("expected JSON object for `" ++ key ++ "`, got " ++ show other)
+  where
+    encodePairs pairs =
+      JsonObject [(renderModuleName name, JsonString value) | (name, value) <- sort pairs]
+    decodeEntry (name, JsonString value) = do
+      moduleName <- mkModuleName name
+      Right (moduleName, value)
+    decodeEntry (name, _) = Left ("expected string value in object field `" ++ name ++ "`")
+
 nested :: Codec a a -> Value a
 nested codec =
   Value (JsonObject . codecEnc codec) $ \key value ->
@@ -183,20 +299,15 @@ nested codec =
       JsonObject fields -> codecDec codec fields
       other -> Left ("expected JSON object for `" ++ key ++ "`, got " ++ show other)
 
-asObject :: String -> Json -> Either String [(String, Json)]
-asObject _ (JsonObject fields) = Right fields
-asObject context other =
-  Left ("expected JSON object for " ++ context ++ ", got " ++ show other)
-
 -- | Decodes to a @FilePath -> ProjectSkeleton@ because @skeletonPath@ is
 -- supplied out of band rather than read from JSON.
 projectSkeletonCodec :: Codec ProjectSkeleton (FilePath -> ProjectSkeleton)
 projectSkeletonCodec =
   assemble
-    <$> field "projectKey" projectKey vstring
+    <$> field "projectKey" projectKey vprojectKey
     <*> field "localPackages" localPackages (vlist (nested localPackageCodec))
     <*> field "sourceRepos" sourceRepos (vlist vstringMap)
-    <*> field "planCacheKey" planCacheKey vstring
+    <*> field "planCacheKey" planCacheKey vplanCacheKey
     <*> field "plannerDrvInputs" plannerDrvInputs (vlist vstring)
     <*> field "granularity" granularity vgranularity
     <*> field "backpack" backpack (nested backpackCodec)
@@ -205,25 +316,40 @@ projectSkeletonCodec =
     assemble pk lps repos cacheKey drvInputs gran bp outs path =
       ProjectSkeleton path pk lps repos cacheKey drvInputs gran bp outs
 
+vprojectKey :: Value ProjectKey
+vprojectKey = vstringVia renderProjectKey (fmap ProjectKey . parseDigest "projectKey")
+
+vplanCacheKey :: Value PlanCacheKey
+vplanCacheKey = vstringVia renderPlanCacheKey (fmap PlanCacheKey . parseDigest "planCacheKey")
+
+parseDigest :: String -> String -> Either String Blake3Digest
+parseDigest label text =
+  case stripPrefix "blake3:" text of
+    Just digest ->
+      case parseBlake3Digest digest of
+        Left err -> Left (label ++ ": " ++ err)
+        Right value -> Right value
+    _ -> Left (label ++ " must be `blake3:` followed by 64 hexadecimal digits")
+
 localPackageCodec :: Codec LocalPackage LocalPackage
 localPackageCodec =
   LocalPackage
-    <$> field "name" packageName vstring
+    <$> field "name" packageName vpkgName
     <*> field "version" packageVersion vstring
-    <*> field "components" packageComponents (vlist vstring)
+    <*> field "components" packageComponents (vlist vcomponentId)
     <*> field "componentDetails" packageComponentDetails (vlist (nested localComponentCodec))
-    <*> field "signatures" packageSignatures (vlist vstring)
-    <*> field "requiredSignatures" packageRequiredSignatures (vlist vstring)
-    <*> field "providedModules" packageProvidedModules (vlist vstring)
+    <*> field "signatures" packageSignatures (vlist vmoduleName)
+    <*> field "requiredSignatures" packageRequiredSignatures (vlist vmoduleName)
+    <*> field "providedModules" packageProvidedModules (vlist vmoduleName)
 
 localComponentCodec :: Codec LocalComponent LocalComponent
 localComponentCodec =
   LocalComponent
-    <$> field "component" componentName vstring
+    <$> field "component" componentName vcomponentId
     <*> field "kind" componentKind vcomponentKind
-    <*> field "providedModules" componentProvidedModules (vlist vstring)
-    <*> field "signatures" componentSignatures (vlist vstring)
-    <*> field "requiredSignatures" componentRequiredSignatures (vlist vstring)
+    <*> field "providedModules" componentProvidedModules (vlist vmoduleName)
+    <*> field "signatures" componentSignatures (vlist vmoduleName)
+    <*> field "requiredSignatures" componentRequiredSignatures (vlist vmoduleName)
     <*> field "mixins" componentMixins (vlist vstring)
     <*> field "reexportedModules" componentReexportedModules (vlist vstring)
 
@@ -236,19 +362,19 @@ backpackCodec =
 indefiniteUnitCodec :: Codec IndefiniteUnit IndefiniteUnit
 indefiniteUnitCodec =
   IndefiniteUnit
-    <$> field "unit" indefiniteUnit vstring
-    <*> field "package" indefinitePackage vstring
-    <*> field "component" indefiniteComponent vstring
-    <*> field "signatures" indefiniteSignatures (vlist vstring)
-    <*> field "requiredSignatures" indefiniteRequiredSignatures (vlist vstring)
+    <$> field "unit" indefiniteUnit vunitKey
+    <*> field "package" indefinitePackage vpkgName
+    <*> field "component" indefiniteComponent vcomponentId
+    <*> field "signatures" indefiniteSignatures (vlist vmoduleName)
+    <*> field "requiredSignatures" indefiniteRequiredSignatures (vlist vmoduleName)
     <*> field "mixins" indefiniteMixins (vlist vstring)
     <*> field "reexportedModules" indefiniteReexportedModules (vlist vstring)
 
 expectedInstantiationCodec :: Codec ExpectedInstantiation ExpectedInstantiation
 expectedInstantiationCodec =
   ExpectedInstantiation
-    <$> field "unit" instantiationUnit vstring
-    <*> field "holes" instantiationHoles vstringMap
+    <$> field "unit" instantiationUnit vunitKey
+    <*> field "holes" instantiationHoles vmoduleStringMap
 
 expectedOutputsCodec :: Codec ExpectedOutputs ExpectedOutputs
 expectedOutputsCodec =

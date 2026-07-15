@@ -187,7 +187,7 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 work_dir="${PENANCE_STACKAGE_WORKDIR:-/tmp/penance-stackage-${safe_resolver}-${safe_package}-${timestamp}}"
 project_dir="$work_dir/project"
 out_link="${PENANCE_STACKAGE_OUT_LINK:-$default_out_dir/result-stackage-${safe_resolver}-${safe_package}}"
-metrics_dir="${PENANCE_STACKAGE_BENCH_OUT:-docs/bench-results}"
+metrics_dir="${PENANCE_STACKAGE_BENCH_OUT:-.penance/bench-results}"
 metrics="$metrics_dir/stackage-${safe_resolver}-${safe_package}-${system}-${timestamp}.tsv"
 
 rm -rf "$work_dir"
@@ -216,6 +216,15 @@ fi
 
 printf 'resolved %s in %s: %s-%s (%s, %s)\n' \
   "$package_name" "$resolver" "$package_name" "$package_version" "$snapshot_compiler_name" "$compiler_nix_name" >&2
+
+repent_ghc_pkg="${PENANCE_GHC_PKG:-ghc-pkg}"
+repent_ghc="$(dirname "$repent_ghc_pkg")/ghc"
+repent_compiler="ghc-$($repent_ghc --numeric-version)"
+if [[ "$repent_compiler" != "$snapshot_compiler_name" ]]; then
+  printf 'repent compiler %s does not match snapshot compiler %s\n' \
+    "$repent_compiler" "$snapshot_compiler_name" >&2
+  exit 1
+fi
 
 printf 'fetching Hackage source: %s-%s\n' "$package_name" "$package_version" >&2
 if [[ "${PENANCE_CABAL_UPDATE:-1}" != "0" ]]; then
@@ -246,6 +255,14 @@ EOF
 cat >"$project_dir/cabal.project" <<EOF
 packages: ./$package_dir_name
 EOF
+
+"${PENANCE_REPENT_BIN:-repent}" \
+  --project "$project_dir" \
+  --compiler "$snapshot_compiler_name" \
+  --ghc-pkg "${PENANCE_GHC_PKG:-ghc-pkg}" \
+  --index-state "${snapshot_index_state:-$resolver}" \
+  --out "$project_dir/penance.lock" \
+  --hackage-nix-dir "$project_dir/nix/penance-hackage"
 
 nix_repo_url="$(nix_string "path:$repo_root")"
 nix_system="$(nix_string "$system")"
@@ -286,12 +303,12 @@ cat >"$work_dir/flake.nix" <<EOF
       snapshotUrl = $nix_snapshot_url;
       snapshotCompiler = $nix_snapshot_compiler;
       compilerNixName = $nix_compiler_nix_name;
-      penanceModule = (penanceLib.penanceProject {
+      penanceSurface = (penanceLib.penanceProject {
         inherit src;
         compiler = snapshotCompiler;
         index-state = $nix_index_state;
-        mode = "module";
-      }).drvGraph;
+        mode = "component";
+      }).surface;
       stackageProject = haskellNixPkgs.haskell-nix.stackProject' {
         src = haskellNixPkgs.haskell-nix.cleanSourceHaskell {
           name = packageName + "-stackage-src";
@@ -381,7 +398,7 @@ cat >"$work_dir/flake.nix" <<EOF
     in
     {
       packages.\${system} = {
-        inherit dependencyClosureJson haskellNixBuildClosure penanceModule;
+        inherit dependencyClosureJson haskellNixBuildClosure penanceSurface;
       };
       checks.\${system}.build-closure = haskellNixBuildClosure;
     };
@@ -424,7 +441,7 @@ run_metric() {
 }
 
 run_metric penance_plan_build \
-  "$nix_bin" build "$work_dir#packages.$system.penanceModule" \
+  "$nix_bin" build "$work_dir#packages.$system.penanceSurface" \
     --out-link "$work_dir/result-penance-plan" \
     -L
 

@@ -12,7 +12,7 @@
       "edit": {
         "type": "none"
       },
-      "expectedMaxRebuiltDrvs": 0,
+      "expectedMaxRebuildEvents": 0,
       "required": true,
       "failure": null,
       "notes": "Baseline and edited dry-runs should have the same derivation build set."
@@ -33,7 +33,7 @@
           "replace": "  , User 3 \"katherine\"\n"
         }
       },
-      "expectedMaxRebuiltDrvs": 3,
+      "expectedMaxRebuildEvents": 3,
       "expectedRebuiltNames": [
         "assemble",
         "module:src/Bench/Model.hs",
@@ -59,7 +59,7 @@
           "replace": "m15 = m13 ++ \"|m15-body-edited\"\n"
         }
       },
-      "expectedMaxRebuiltDrvs": 3,
+      "expectedMaxRebuildEvents": 3,
       "expectedRebuiltNames": [
         "assemble",
         "module:src/Cutoff/M15.hs",
@@ -85,7 +85,7 @@
           "replace": "m15 = m13 ++ \"|m15-body\"\n\nm15Export :: String\nm15Export = \"m15-export\"\n"
         }
       },
-      "expectedMaxRebuiltDrvs": 19,
+      "expectedMaxRebuildEvents": 19,
       "expectedRebuiltNames": [
         "assemble",
         "module:app/Main.hs",
@@ -122,7 +122,7 @@
       "edit": {
         "type": "none"
       },
-      "expectedMaxRebuiltDrvs": 0,
+      "expectedMaxRebuildEvents": 0,
       "expectedRebuiltNames": [],
       "required": true,
       "failure": null,
@@ -140,11 +140,11 @@
         "type": "replace",
         "file": "src/TH/Dep.hs",
         "patch": {
-          "find": "depValue = \"dep-v1\"\n",
-          "replace": "depValue = \"dep-v2\"\n"
+          "find": "depValue = baseValue ++ \":dep-v1\"\n",
+          "replace": "depValue = baseValue ++ \":dep-v2\"\n"
         }
       },
-      "expectedMaxRebuiltDrvs": 4,
+      "expectedMaxRebuildEvents": 4,
       "expectedRebuiltNames": [
         "assemble",
         "module:src/TH/Dep.hs",
@@ -170,7 +170,7 @@
           "replace": "data Map k v\n\n-- Rebuild scenario signature edit.\n\n"
         }
       },
-      "expectedMaxRebuiltDrvs": null,
+      "expectedMaxRebuildEvents": null,
       "required": true,
       "failure": "The Backpack rebuild matrix is not implemented, so this signature edit records the current derivation set without an enforced bound.",
       "notes": "This row becomes bounded when indefinite units and instantiations have measured rebuild scopes."
@@ -190,7 +190,7 @@
           "replace": "size (Map entries) = length entries + 0\n"
         }
       },
-      "expectedMaxRebuiltDrvs": null,
+      "expectedMaxRebuildEvents": null,
       "required": true,
       "failure": "The Backpack rebuild matrix is not implemented, so this implementation-body edit records the current derivation set without an enforced bound.",
       "notes": "This row becomes bounded when implementation body edits cut off unchanged instantiation interfaces."

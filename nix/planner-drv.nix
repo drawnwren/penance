@@ -1,13 +1,16 @@
-{ lib
-, pkgs
-, penancePlanner ? null
+{
+  lib,
+  pkgs,
+  penancePlanner ? null,
 }:
 
-{ src
-, compiler
-, index-state
-, skeleton
-, granularity
+assert penancePlanner != null;
+{
+  src,
+  compiler,
+  index-state,
+  skeleton,
+  granularity,
 }:
 
 pkgs.stdenvNoCC.mkDerivation {
@@ -17,11 +20,14 @@ pkgs.stdenvNoCC.mkDerivation {
   dontUnpack = true;
   preferLocalBuild = true;
   allowSubstitutes = false;
+  __contentAddressed = true;
+  outputHashMode = "recursive";
+  outputHashAlgo = "sha256";
 
   passAsFile = [ "skeletonJson" ];
   skeletonJson = builtins.toJSON skeleton;
 
-  nativeBuildInputs = lib.optional (penancePlanner != null) penancePlanner;
+  nativeBuildInputs = [ penancePlanner ];
 
   buildCommand = ''
     set -eu
@@ -38,24 +44,12 @@ pkgs.stdenvNoCC.mkDerivation {
     }
     EOF
 
-    if command -v penance-planner >/dev/null 2>&1; then
-      penance-planner \
-        --skeleton "$out/project-skeleton.json" \
-        --src "${src}" \
-        --index-state "${index-state}" \
-        --granularity "${granularity}" \
-        --out "$out"
-    else
-      echo "penance-planner not available; emitted no-op dynamic graph bootstrap" >&2
-      cat > "$out/dynamic-graph.json" <<EOF
-    {
-      "status": "bootstrap",
-      "componentGraphDrv": true,
-      "moduleGraphDrv": true,
-      "backpackGraphDrv": true
-    }
-    EOF
-    fi
+    penance-planner \
+      --skeleton "$out/project-skeleton.json" \
+      --src "${src}" \
+      --index-state "${index-state}" \
+      --granularity "${granularity}" \
+      --out "$out"
   '';
 
   requiredSystemFeatures = [ "recursive-nix" ];

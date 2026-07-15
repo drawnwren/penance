@@ -31,4 +31,4 @@ expand = true
 heading-split-level = 3
 
 [output.html.redirect]
-"/NEW_ARCHITECTURE.MD" = "NEW_ARCHITECTURE.html"
+"/NEW_ARCHITECTURE.md" = "NEW_ARCHITECTURE.html"

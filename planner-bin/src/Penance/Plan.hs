@@ -7,19 +7,20 @@ where
 
 import Penance.Json (Json, renderJson)
 import qualified Penance.Json as Json
+import Penance.Error (throwJsonError)
 import Penance.Skeleton (ProjectSkeleton, decodeProjectSkeleton)
-import System.Exit (die)
+import Penance.Utf8.IO (readUtf8File, writeUtf8File)
 
 readSkeleton :: FilePath -> IO ProjectSkeleton
 readSkeleton path = do
-  contents <- readFile path
+  contents <- readUtf8File path
   case Json.parseJson contents >>= decodeProjectSkeleton path of
-    Left err -> die ("failed to parse ProjectSkeleton: " ++ err)
+    Left err -> throwJsonError ("failed to parse ProjectSkeleton: " ++ err)
     Right skeleton -> pure skeleton
 
 writeJsonFile :: FilePath -> Json -> IO ()
 writeJsonFile path value =
-  writeFile path (renderJson value ++ "\n")
+  writeUtf8File path (renderJson value ++ "\n")
 
 drvFileFor :: String -> String
 drvFileFor name = safeFileName name ++ ".drv.plan.json"

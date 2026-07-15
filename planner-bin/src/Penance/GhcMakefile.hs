@@ -5,12 +5,15 @@ module Penance.GhcMakefile
   )
 where
 
-import Data.List (isSuffixOf)
+import Data.Char (isSpace)
+import Data.Graph (SCC (..), stronglyConnComp)
+import Data.List (intercalate, isSuffixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
+import Penance.Error (throwGraphError)
+import Penance.Utf8.IO (readUtf8File)
 import System.Directory (doesFileExist)
-import System.Exit (die)
 
 data ObjectRule = ObjectRule
   { ruleObject :: FilePath
@@ -65,7 +68,7 @@ moduleGraphFromMakefile makefile = do
           | deps <- objectDeps
           , Just source <- [objectSource deps]
           ]
-  order <- topoSort makefile sourceByHi depsBySource
+  order <- either throwGraphError pure (topoSort makefile sourceByHi depsBySource)
   pure
     [ ModuleDep
         { moduleSource = source
@@ -77,22 +80,22 @@ moduleGraphFromMakefile makefile = do
 
 readLogicalLines :: FilePath -> IO [String]
 readLogicalLines makefile = do
-  physical <- lines <$> readFile makefile
-  pure (go "" physical)
+  physical <- lines <$> readUtf8File makefile
+  pure (go [] physical)
   where
-    go acc [] = [acc | not (null acc)]
-    go acc (line0 : rest) =
+    go parts [] = [concat (reverse parts) | not (null parts)]
+    go parts (line0 : rest) =
       let line = stripTrailingCR line0
        in case stripTrailingBackslash line of
-            Just continued -> go (acc ++ continued ++ " ") rest
-            Nothing -> (acc ++ line) : go "" rest
+            Just continued -> go (" " : continued : parts) rest
+            Nothing -> concat (reverse (line : parts)) : go [] rest
 
 parseObjectRule :: String -> Maybe ObjectRule
 parseObjectRule line =
   case break (== ':') line of
     (targetsText, _ : depsText) ->
-      let targets = words targetsText
-          deps = words depsText
+      let targets = splitMakeWords targetsText
+          deps = splitMakeWords depsText
        in case filter isObjectTarget targets of
             [] -> Nothing
             firstObject : _ ->
@@ -123,31 +126,44 @@ firstExistingSource deps =
         then pure (Just candidate)
         else go rest
 
-topoSort :: FilePath -> Map.Map FilePath FilePath -> Map.Map FilePath [FilePath] -> IO [FilePath]
+topoSort :: FilePath -> Map.Map FilePath FilePath -> Map.Map FilePath [FilePath] -> Either String [FilePath]
 topoSort makefile sourceByHi depsBySource =
-  go Set.empty (Set.fromList (Map.keys depsBySource)) []
+  case [cycleSources | CyclicSCC cycleSources <- components] of
+    cycleSources : _ ->
+      Left
+        ( "cycle in "
+            ++ makefile
+            ++ ": "
+            ++ intercalate " -> " (cycleSources ++ take 1 cycleSources)
+        )
+    [] -> Right [source | AcyclicSCC source <- components]
   where
-    go _ remaining order
-      | Set.null remaining = pure (reverse order)
-    go done remaining order = do
-      let ready = filter (isReady done) (Set.toAscList remaining)
-      case ready of
-        [] ->
-          die ("cycle or missing dependency in " ++ makefile ++ ": " ++ unwords (Set.toAscList remaining))
-        _ -> do
-          let readySet = Set.fromList ready
-          go
-            (Set.union done readySet)
-            (Set.difference remaining readySet)
-            (reverse ready ++ order)
+    components = stronglyConnComp (map graphNode (Map.keys depsBySource))
+    graphNode source =
+      ( source
+      , source
+      , uniqueSorted
+          [ dependencySource
+          | hi <- Map.findWithDefault [] source depsBySource
+          , Just dependencySource <- [Map.lookup hi sourceByHi]
+          , dependencySource /= source
+          ]
+      )
 
-    isReady done source =
-      all dependencyDone (Map.findWithDefault [] source depsBySource)
-      where
-        dependencyDone hi =
-          case Map.lookup hi sourceByHi of
-            Nothing -> True
-            Just dependencySource -> dependencySource == source || Set.member dependencySource done
+splitMakeWords :: String -> [String]
+splitMakeWords = reverse . finish . foldl step (False, [], [])
+  where
+    step (escaped, current, values) ch
+      | escaped = (False, ch : current, values)
+      | ch == '\\' = (True, current, values)
+      | isSpace ch = emit current values
+      | otherwise = (False, ch : current, values)
+    finish (escaped, current, values) =
+      let finalCurrent = if escaped then '\\' : current else current
+       in third (emit finalCurrent values)
+    emit [] values = (False, [], values)
+    emit current values = (False, [], reverse current : values)
+    third (_, _, value) = value
 
 isObjectTarget :: FilePath -> Bool
 isObjectTarget path =

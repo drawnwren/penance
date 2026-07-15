@@ -73,6 +73,10 @@ nix run .#bench-architecture-phases
 Add `--repeat 3 --require-penance-faster` to enforce the same section-median
 speed gate used by the total benchmark.
 
+The aggregate forced-rebuild pass excludes `M6-cross-aarch64`. Applying Nix's
+recursive `--rebuild` mode to that row rebuilds the cross-GHC toolchain rather
+than only the Haskell fixture; M6 remains covered by the normal phase matrix.
+
 For haskell.nix advertised-baseline coverage, including explicit failing rows
 for parity features penance does not implement yet, run:
 
@@ -100,7 +104,7 @@ For rebuild-count scenarios used by cutoff rows, run:
 nix run .#bench-rebuild-scenarios -- --keep-going
 ```
 
-The bounded no-op scenario enforces zero rebuilt derivations. Dyndrv cutoff
+The bounded no-op scenario enforces zero rebuild events. Dyndrv cutoff
 rows use real build logs to assert exact planner/module/assemble events, while
 older rows still use dry-run derivation diffs. Scenarios without a bound report
 current counts and fail until the matching mechanism exists. The total
@@ -131,7 +135,7 @@ or through the flake app:
 nix run .#bench-vs-haskell-nix
 ```
 
-The script writes TSV results and command logs under `docs/bench-results/`. It measures:
+The script writes TSV results and command logs under `.penance/bench-results/`. It measures:
 
 - `penanceBenchModule` eval
 - `penanceBenchComponent` eval
@@ -155,7 +159,9 @@ nix eval --raw .#packages.$(nix eval --raw --impure --expr builtins.currentSyste
 
 This is currently an eval/planning comparison. `penance` still emits graph-plan JSON, not real Haskell build derivations, so first-build and incremental-rebuild timings are intentionally left blank until dynamic derivation emission lands.
 
-The harness uses `PENANCE_NIX_BIN` when set. The flake app points it at `/nix/var/nix/profiles/default/bin/nix` when available so Determinate-only features such as `builtins.wasm` are not hidden by a plain `pkgs.nix` binary.
+The harness uses `PENANCE_NIX_BIN` when set. Otherwise every app and recursive
+builder uses the pinned `pkgs.nix` in its closure. Set the override explicitly
+when exercising evaluator extensions, such as a Nix build with `builtins.wasm`.
 
 ## First Local Run
 
@@ -295,7 +301,7 @@ The default output link is:
 result-stackage-<resolver>-<package>/dependency-closure.json
 ```
 
-Benchmark timing rows are written under `docs/bench-results/`.
+Benchmark timing rows are written under `.penance/bench-results/`.
 
 Required scenarios:
 

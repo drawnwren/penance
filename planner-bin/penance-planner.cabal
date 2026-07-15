@@ -2,135 +2,181 @@ cabal-version: 3.8
 name: penance-planner
 version: 0.1.0.0
 build-type: Simple
-license: MIT
-extra-source-files: src/IfaceCanonMain.hs
+license: NONE
+synopsis: Lock-driven Haskell build planning for Nix
+description:
+  Penance turns Cabal plans and GHC module graphs into deterministic,
+  lock-driven Nix build graphs.
+maintainer: Penance contributors
+-- Built separately against the exact producer GHC API by the Nix flake.
+extra-source-files:
+  src/IfaceCanonMain.hs
+  test/data/ghc-makefile.mk
+  test/data/plan.json
+    test/data/package-set.nix
+  test/data/plan-project/Setup.hs
+  test/data/plan-project/app/Main.hs
+  test/data/plan-project/cabal.project
+  test/data/plan-project/real-plan-fixture.cabal
+  test/data/plan-project/src/Fixture.hs
+  test/data/src/Boot.hs-boot
+  test/data/src/Consumer.hs
+  "test/data/src/Space Module.hs"
 
-executable penance-planner
-  main-is: Main.hs
+library
   hs-source-dirs: src
-  other-modules:
-    Penance.Json
-    Penance.Plan
-    Penance.Skeleton
-    Penance.Types
+  exposed-modules:
+    Penance.Blake3
+    Penance.Bench.Common
+    Penance.CabalLex
+    Penance.CabalPlan
+    Penance.CabalProject
+    Penance.Dyndrv
+    Penance.Error
+    Penance.Emit.Drv
+    Penance.GhcMakefile
+    Penance.Graph.Backpack
     Penance.Graph.Component
     Penance.Graph.Module
     Penance.Graph.Package
-    Penance.Graph.TH
-    Penance.Graph.Backpack
-    Penance.Emit.Drv
+    Penance.Json
+    Penance.Json.Decode
+    Penance.LockLowerer
+    Penance.List
+    Penance.ModulePlan
+    Penance.Plan
+    Penance.Repent.Lock
+    Penance.Repent.PackageSet
+    Penance.Repent.Project
+    Penance.Sha256
+    Penance.Skeleton
+    Penance.Types
+    Penance.Utf8
+    Penance.Utf8.IO
+    Penance.WasmPlanner
   build-depends:
-    base >=4.18 && <5,
-    containers,
+    base >=4.20 && <5,
+    Cabal >=3.10 && <3.17,
+    bytestring >=0.11 && <0.13,
+    containers >=0.6 && <0.8,
+    directory >=1.3 && <1.4,
+    filepath >=1.4 && <1.6,
+    process >=1.6 && <1.7
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+executable penance-planner
+  main-is: Main.hs
+  hs-source-dirs: app/planner
+  build-depends:
+    base >=4.20 && <5,
     directory,
-    filepath
+    filepath,
+    penance-planner
   default-language: Haskell2010
   ghc-options: -Wall
 
 executable penance-architecture-bench
-  main-is: ArchitectureBenchMain.hs
-  hs-source-dirs: src
-  other-modules:
-    Penance.Json
-    Penance.Types
+  main-is: Main.hs
+  hs-source-dirs: app/architecture-bench
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     directory,
     filepath,
+    penance-planner,
     process,
     time
   default-language: Haskell2010
   ghc-options: -Wall
 
 executable penance-bench
-  main-is: BenchMain.hs
-  hs-source-dirs: src
+  main-is: Main.hs
+  hs-source-dirs: app/bench
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     directory,
     filepath,
+    penance-planner,
     process,
     time
   default-language: Haskell2010
   ghc-options: -Wall
 
 executable penance-plan
-  main-is: PlanMain.hs
-  hs-source-dirs: src
-  other-modules:
-    Penance.Dyndrv
-    Penance.GhcMakefile
-    Penance.Json
-    Penance.ModulePlan
-    Penance.Types
+  main-is: Main.hs
+  hs-source-dirs: app/plan
   build-depends:
-    base >=4.18 && <5,
-    containers,
+    base >=4.20 && <5,
     directory,
     filepath,
+    penance-planner,
     process
   default-language: Haskell2010
   ghc-options: -Wall
 
 executable penance-rebuild-bench
-  main-is: RebuildBenchMain.hs
-  hs-source-dirs: src
-  other-modules:
-    Penance.Json
-    Penance.Types
+  main-is: Main.hs
+  hs-source-dirs: app/rebuild-bench
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     directory,
     filepath,
+    penance-planner,
     process,
     time
   default-language: Haskell2010
   ghc-options: -Wall
 
 executable repent
-  main-is: RepentMain.hs
-  hs-source-dirs: src
-  other-modules:
-    Penance.CabalPlan
-    Penance.Json
-    Penance.Types
+  main-is: Main.hs
+  hs-source-dirs: app/repent
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     Cabal,
     bytestring,
+    containers,
     directory,
     filepath,
+    penance-planner,
     process
   default-language: Haskell2010
   ghc-options: -Wall
 
 executable normalize-project
-  main-is: WasmPlannerMain.hs
-  hs-source-dirs: src
-  other-modules:
-    Penance.Blake3
-    Penance.Json
-    Penance.Skeleton
-    Penance.Types
-    Penance.Utf8
-    Penance.WasmPlanner
+  main-is: Main.hs
+  hs-source-dirs: app/normalize-project
   build-depends:
-    base >=4.18 && <5
+    base >=4.20 && <5,
+    penance-planner
   default-language: Haskell2010
   ghc-options: -Wall
 
 test-suite wasm-planner-tests
   type: exitcode-stdio-1.0
-  main-is: WasmPlannerTestMain.hs
-  hs-source-dirs: src
-  other-modules:
-    Penance.Blake3
-    Penance.Json
-    Penance.Skeleton
-    Penance.Types
-    Penance.Utf8
-    Penance.WasmPlanner
+  main-is: Main.hs
+  hs-source-dirs: test/wasm
   build-depends:
-    base >=4.18 && <5
+    base >=4.20 && <5,
+    penance-planner
+  default-language: Haskell2010
+  ghc-options: -Wall
+
+test-suite penance-tests
+  type: exitcode-stdio-1.0
+  main-is: TestMain.hs
+  hs-source-dirs: test
+  other-modules: Paths_penance_planner
+  autogen-modules: Paths_penance_planner
+  build-depends:
+    base >=4.20 && <5,
+    bytestring,
+    Cabal >=3.10 && <3.17,
+    directory,
+    filepath,
+    containers >=0.6 && <0.8,
+    penance-planner,
+    tasty >=1.4 && <1.6,
+    tasty-hunit >=0.10 && <0.11,
+    tasty-quickcheck >=0.10 && <0.12
   default-language: Haskell2010
   ghc-options: -Wall

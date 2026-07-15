@@ -8,26 +8,26 @@ library
   exposed-modules: UsesSignature
   signatures: Data.MyAbstractMap
   hs-source-dirs: src
-  build-depends: base >=4.18 && <5
+  build-depends: base >=4.20 && <5
   default-language: Haskell2010
 
 library list-map
   exposed-modules: Impl.ListMap
   hs-source-dirs: impl-list
-  build-depends: base >=4.18 && <5
+  build-depends: base >=4.20 && <5
   default-language: Haskell2010
 
 library tagged-map
   exposed-modules: Impl.TaggedMap
   hs-source-dirs: impl-tagged
-  build-depends: base >=4.18 && <5
+  build-depends: base >=4.20 && <5
   default-language: Haskell2010
 
 executable list-user
   main-is: ListUser.hs
   hs-source-dirs: app
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     backpack-multi-instance,
     backpack-multi-instance:list-map
   mixins:
@@ -38,7 +38,7 @@ executable tagged-user
   main-is: TaggedUser.hs
   hs-source-dirs: app
   build-depends:
-    base >=4.18 && <5,
+    base >=4.20 && <5,
     backpack-multi-instance,
     backpack-multi-instance:tagged-map
   mixins:

@@ -4,12 +4,15 @@ module Penance.Json
   , bool
   , object
   , parseJson
+  , renderPrettyJson
   , renderJson
   , string
+  , stringArray
   )
 where
 
 import Data.Char (chr, digitToInt, intToDigit, isHexDigit, isSpace, ord)
+import Data.List (sortOn)
 
 data Json
   = JsonObject [(String, Json)]
@@ -28,6 +31,9 @@ array = JsonArray
 
 string :: String -> Json
 string = JsonString
+
+stringArray :: [String] -> Json
+stringArray = array . map string
 
 bool :: Bool -> Json
 bool = JsonBool
@@ -59,6 +65,30 @@ renderJson value =
   where
     renderField (name, fieldValue) = renderString name ++ ":" ++ renderJson fieldValue
 
+renderPrettyJson :: Json -> String
+renderPrettyJson = renderAt 0
+  where
+    renderAt indent value =
+      case value of
+        JsonObject [] -> "{}"
+        JsonObject fields ->
+          "{\n"
+            ++ joinWith ",\n" (map (renderField indent) (sortOn fst fields))
+            ++ "\n"
+            ++ spaces indent
+            ++ "}"
+        JsonArray [] -> "[]"
+        JsonArray values ->
+          "[\n"
+            ++ joinWith ",\n" (map (\item -> spaces (indent + 2) ++ renderAt (indent + 2) item) values)
+            ++ "\n"
+            ++ spaces indent
+            ++ "]"
+        scalar -> renderJson scalar
+    renderField indent (name, value) =
+      spaces (indent + 2) ++ renderString name ++ ": " ++ renderAt (indent + 2) value
+    spaces count = replicate count ' '
+
 parseValue :: String -> Either String (Json, String)
 parseValue input =
   case dropWhile isSpace input of
@@ -69,12 +99,9 @@ parseValue input =
       parseObject [] (dropWhile isSpace rest)
     '[' : rest ->
       parseArray [] (dropWhile isSpace rest)
-    't' : 'r' : 'u' : 'e' : rest ->
-      Right (JsonBool True, rest)
-    'f' : 'a' : 'l' : 's' : 'e' : rest ->
-      Right (JsonBool False, rest)
-    'n' : 'u' : 'l' : 'l' : rest ->
-      Right (JsonNull, rest)
+    other@('t' : _) -> parseKeyword "true" (JsonBool True) other
+    other@('f' : _) -> parseKeyword "false" (JsonBool False) other
+    other@('n' : _) -> parseKeyword "null" JsonNull other
     other@(c : _)
       | c == '-' || isDigitLike c ->
           parseNumber other
@@ -152,17 +179,79 @@ parseStringChars = go []
                         else go (chr code : acc) rest
         '\\' : escaped : _ ->
           Left ("unsupported JSON string escape: \\" ++ [escaped])
+        ch : _
+          | ord ch < 0x20 -> Left "JSON string contains an unescaped control character"
         ch : rest ->
           go (ch : acc) rest
         "" ->
           Left "unterminated JSON string"
 
 parseNumber :: String -> Either String (Json, String)
-parseNumber input =
-  let (digits, rest) = span isNumberChar input
-   in if null digits
-        then Left ("expected JSON number, got: " ++ take 32 input)
-        else Right (JsonNumber digits, rest)
+parseNumber input = do
+  let (sign, unsigned) =
+        case input of
+          '-' : rest -> ("-", rest)
+          _ -> ("", input)
+  (integer, afterInteger) <- parseInteger unsigned
+  (fraction, afterFraction) <- parseFraction afterInteger
+  (exponentText, rest) <- parseExponent afterFraction
+  pure (JsonNumber (sign ++ integer ++ fraction ++ exponentText), rest)
+
+parseInteger :: String -> Either String (String, String)
+parseInteger input =
+  case input of
+    '0' : rest
+      | startsDigit rest -> Left "JSON number has a leading zero"
+      | otherwise -> Right ("0", rest)
+    digit : rest
+      | digit >= '1' && digit <= '9' ->
+          let (digits, suffix) = span isDigitLike rest
+           in Right (digit : digits, suffix)
+    _ -> Left ("expected JSON integer, got: " ++ take 32 input)
+
+parseFraction :: String -> Either String (String, String)
+parseFraction input =
+  case input of
+    '.' : rest ->
+      let (digits, suffix) = span isDigitLike rest
+       in if null digits
+            then Left "JSON fraction requires at least one digit"
+            else Right ('.' : digits, suffix)
+    _ -> Right ("", input)
+
+parseExponent :: String -> Either String (String, String)
+parseExponent input =
+  case input of
+    marker : rest
+      | marker == 'e' || marker == 'E' ->
+          let (sign, unsigned) =
+                case rest of
+                  prefix : unsignedRest | prefix == '+' || prefix == '-' -> ([prefix], unsignedRest)
+                  _ -> ("", rest)
+              (digits, suffix) = span isDigitLike unsigned
+           in if null digits
+                then Left "JSON exponent requires at least one digit"
+                else Right (marker : sign ++ digits, suffix)
+    _ -> Right ("", input)
+
+parseKeyword :: String -> Json -> String -> Either String (Json, String)
+parseKeyword keyword value input =
+  case splitAt (length keyword) input of
+    (actual, rest)
+      | actual == keyword && not (startsIdentifier rest) -> Right (value, rest)
+      | otherwise -> Left ("invalid JSON keyword: " ++ take 32 input)
+
+startsDigit :: String -> Bool
+startsDigit (ch : _) = isDigitLike ch
+startsDigit [] = False
+
+startsIdentifier :: String -> Bool
+startsIdentifier (ch : _) =
+  isDigitLike ch
+    || (ch >= 'a' && ch <= 'z')
+    || (ch >= 'A' && ch <= 'Z')
+    || ch == '_'
+startsIdentifier [] = False
 
 requireChar :: Char -> String -> Either String String
 requireChar expected input =
@@ -222,7 +311,3 @@ joinWith separator (x : xs) = x ++ separator ++ joinWith separator xs
 
 isDigitLike :: Char -> Bool
 isDigitLike ch = ch >= '0' && ch <= '9'
-
-isNumberChar :: Char -> Bool
-isNumberChar ch =
-  isDigitLike ch || ch `elem` ("-+.eE" :: String)

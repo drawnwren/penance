@@ -1,0 +1,152 @@
+{
+  "compiler": "ghc-9.10.2",
+  "externalUnits": [
+    {
+      "component": null,
+      "depends": [
+        "ghc-internal-9.1002.0-d099",
+        "ghc-prim-0.12.0-71e8"
+      ],
+      "exeDepends": [],
+      "flags": {},
+      "instantiatedWith": {},
+      "name": "base",
+      "source": "ghc-boot",
+      "style": "global",
+      "unitId": "base-4.20.1.0-79d1",
+      "version": "4.20.1.0"
+    },
+    {
+      "component": null,
+      "depends": [
+        "ghc-prim-0.12.0-71e8"
+      ],
+      "exeDepends": [],
+      "flags": {},
+      "instantiatedWith": {},
+      "name": "ghc-bignum",
+      "source": "ghc-boot",
+      "style": "global",
+      "unitId": "ghc-bignum-1.3-a616",
+      "version": "1.3"
+    },
+    {
+      "component": null,
+      "depends": [
+        "ghc-bignum-1.3-a616",
+        "ghc-prim-0.12.0-71e8",
+        "rts-1.0.2"
+      ],
+      "exeDepends": [],
+      "flags": {},
+      "instantiatedWith": {},
+      "name": "ghc-internal",
+      "source": "ghc-boot",
+      "style": "global",
+      "unitId": "ghc-internal-9.1002.0-d099",
+      "version": "9.1002.0"
+    },
+    {
+      "component": null,
+      "depends": [
+        "rts-1.0.2"
+      ],
+      "exeDepends": [],
+      "flags": {},
+      "instantiatedWith": {},
+      "name": "ghc-prim",
+      "source": "ghc-boot",
+      "style": "global",
+      "unitId": "ghc-prim-0.12.0-71e8",
+      "version": "0.12.0"
+    },
+    {
+      "component": null,
+      "depends": [],
+      "exeDepends": [],
+      "flags": {},
+      "instantiatedWith": {},
+      "name": "rts",
+      "source": "ghc-boot",
+      "style": "global",
+      "unitId": "rts-1.0.2",
+      "version": "1.0.2"
+    }
+  ],
+  "indexState": "2026-04-01T00:00:00Z",
+  "packages": [
+    {
+      "cabalFile": "model/example-model.cabal",
+      "components": [
+        {
+          "defaultExtensions": [],
+          "dependencies": [
+            "base >=4.20 && <5"
+          ],
+          "externalDepends": [
+            "base-4.20.1.0-79d1"
+          ],
+          "externalExeDepends": [],
+          "kind": "library",
+          "main": null,
+          "modules": [
+            "Example.Model"
+          ],
+          "name": "lib",
+          "needsFullDb": false,
+          "signatures": [],
+          "sourceDirs": [
+            "src"
+          ],
+          "unitId": "example-model-0.1.0.0-inplace"
+        }
+      ],
+      "name": "example-model",
+      "path": "model",
+      "setupType": "Simple",
+      "version": "0.1.0.0"
+    },
+    {
+      "cabalFile": "server/example-server.cabal",
+      "components": [
+        {
+          "defaultExtensions": [],
+          "dependencies": [
+            "base >=4.20 && <5",
+            "example-model"
+          ],
+          "externalDepends": [
+            "base-4.20.1.0-79d1"
+          ],
+          "externalExeDepends": [],
+          "kind": "executable",
+          "main": "Main.hs",
+          "modules": [
+            "Main.hs"
+          ],
+          "name": "exe:example-server",
+          "needsFullDb": false,
+          "signatures": [],
+          "sourceDirs": [
+            "app"
+          ],
+          "unitId": "example-server-0.1.0.0-inplace-example-server"
+        }
+      ],
+      "name": "example-server",
+      "path": "server",
+      "setupType": "Simple",
+      "version": "0.1.0.0"
+    }
+  ],
+  "project": {
+    "cabalProject": "cabal.project",
+    "packages": [
+      "model",
+      "server"
+    ],
+    "pathBase": "project-root",
+    "root": "."
+  },
+  "schema": "penance/lock/2"
+}

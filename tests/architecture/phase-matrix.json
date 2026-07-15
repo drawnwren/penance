@@ -20,11 +20,11 @@
       "title": "Commit-time lock generation",
       "status": "comparison",
       "comparison": "repent-vs-haskell-nix-plan",
-      "penanceAttr": "repentBench",
+      "penanceAttr": "repentBenchPlan",
       "haskellNixAttr": "haskellNixBenchPlan",
       "required": true,
       "failure": null,
-      "notes": "Runs repent --check against the committed benchmark fixture lock plus the StateVar external-dependency lock fixture, asserts deterministic bytes, stale-lock rejection, hackage sdist metadata, and ghc-boot metadata, then compares with the real haskell.nix generated plan output."
+      "notes": "Measures one repent solver run that byte-checks and writes the committed benchmark lock against one real haskell.nix generated plan output. The broader deterministic, stale-lock, Hackage sdist, and ghc-boot proof remains enforced by checks.repent-lock-proof."
     },
     {
       "id": "M2-static-unit-simple",
@@ -77,14 +77,14 @@
     {
       "id": "M6-cross-aarch64",
       "milestone": "M6",
-      "title": "aarch64-linux target build",
+      "title": "Haskell aarch64-linux target build",
       "status": "comparison",
-      "comparison": "penance-aarch64-vs-haskell-nix-aarch64",
-      "penanceAttr": "penanceAarch64LinuxReal",
-      "haskellNixAttr": "haskellNixAarch64LinuxBaseline",
+      "comparison": "penance-haskell-cross-vs-haskell-nix-project-cross",
+      "penanceAttr": "penanceHaskellAarch64LinuxReal",
+      "haskellNixAttr": "haskellNixProjectCrossAarch64",
       "required": true,
       "failure": null,
-      "notes": "Builds aarch64-linux ELF probes: penance emits a fixed minimal target ELF in a raw derivation, while the haskell.nix baseline uses the overlay cross stdenv. Haskell project cross parity is covered by HN-project-cross."
+      "notes": "Compiles the same Haskell executable for aarch64-linux with the same cross GHC: penance invokes the compiler directly, while the haskell.nix baseline uses projectCross and Cabal Setup machinery. Both outputs are checked as real aarch64 ELF executables."
     },
     {
       "id": "M7-msc",

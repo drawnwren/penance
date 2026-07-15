@@ -11,7 +11,12 @@ import Penance.Skeleton
   ( BackpackSkeleton (..)
   , ExpectedInstantiation (..)
   , IndefiniteUnit (..)
+  , ModuleName
   , ProjectSkeleton (..)
+  , renderComponentId
+  , renderModuleName
+  , renderPkgName
+  , renderUnitKey
   )
 import Penance.Plan (drvFileFor, writeJsonFile)
 import Penance.Types
@@ -26,7 +31,7 @@ import System.FilePath ((</>))
 
 data BackpackEntry
   = SignatureTypecheck IndefiniteUnit FilePath
-  | SignatureInterface IndefiniteUnit String FilePath
+  | SignatureInterface IndefiniteUnit ModuleName FilePath
   | InstantiationPlan ExpectedInstantiation FilePath
   deriving (Eq, Show)
 
@@ -37,9 +42,9 @@ backpackDrvEntries skeleton =
     entryKeyPath entry =
       case entry of
         SignatureTypecheck unit path ->
-          (indefiniteUnit unit ++ ":typecheck", path)
+          (renderUnitKey (indefiniteUnit unit) ++ ":typecheck", path)
         SignatureInterface unit signature path ->
-          (indefiniteUnit unit ++ ":" ++ signature, path)
+          (renderUnitKey (indefiniteUnit unit) ++ ":" ++ renderModuleName signature, path)
         InstantiationPlan instantiation path ->
           (instantiationKey instantiation, path)
 
@@ -57,14 +62,14 @@ backpackEntries skeleton =
   where
     bp = backpack skeleton
     typecheckEntries =
-      [ SignatureTypecheck unit ("signatures" </> drvFileFor (indefiniteUnit unit ++ ":typecheck"))
+      [ SignatureTypecheck unit ("signatures" </> drvFileFor (renderUnitKey (indefiniteUnit unit) ++ ":typecheck"))
       | unit <- indefiniteUnits bp
       ]
     signatureEntries =
       [ SignatureInterface
           unit
           signature
-          ("signatures" </> drvFileFor (indefiniteUnit unit ++ ":" ++ signature))
+          ("signatures" </> drvFileFor (renderUnitKey (indefiniteUnit unit) ++ ":" ++ renderModuleName signature))
       | unit <- indefiniteUnits bp
       , signature <- indefiniteSignatures unit
       ]
@@ -80,8 +85,6 @@ backpackGraphJson skeleton =
   object
     [ ("kind", string (renderPlanArtifactKind BackpackGraphArtifact))
     , ("status", string (renderPlanStatus Planned))
-    , ("projectKey", string (projectKey skeleton))
-    , ("planCacheKey", string (planCacheKey skeleton))
     , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("indefiniteUnits", array (map indefiniteUnitJson (indefiniteUnits (backpack skeleton))))
     , ("expectedInstantiations", array (map instantiationJson (expectedInstantiations (backpack skeleton))))
@@ -91,11 +94,11 @@ backpackGraphJson skeleton =
 indefiniteUnitJson :: IndefiniteUnit -> Json.Json
 indefiniteUnitJson unit =
   object
-    [ ("unit", string (indefiniteUnit unit))
-    , ("package", string (indefinitePackage unit))
-    , ("component", string (indefiniteComponent unit))
-    , ("signatures", array (map string (indefiniteSignatures unit)))
-    , ("requiredSignatures", array (map string (indefiniteRequiredSignatures unit)))
+    [ ("unit", string (renderUnitKey (indefiniteUnit unit)))
+    , ("package", string (renderPkgName (indefinitePackage unit)))
+    , ("component", string (renderComponentId (indefiniteComponent unit)))
+    , ("signatures", array (map (string . renderModuleName) (indefiniteSignatures unit)))
+    , ("requiredSignatures", array (map (string . renderModuleName) (indefiniteRequiredSignatures unit)))
     , ("mixins", array (map string (indefiniteMixins unit)))
     , ("reexportedModules", array (map string (indefiniteReexportedModules unit)))
     ]
@@ -103,12 +106,12 @@ indefiniteUnitJson unit =
 instantiationJson :: ExpectedInstantiation -> Json.Json
 instantiationJson instantiation =
   object
-    [ ("unit", string (instantiationUnit instantiation))
+    [ ("unit", string (renderUnitKey (instantiationUnit instantiation)))
     , ("holes", object (map holeJson (instantiationHoles instantiation)))
     , ("instantiationKey", string (instantiationKey instantiation))
     ]
   where
-    holeJson (hole, provider) = (hole, string provider)
+    holeJson (hole, provider) = (renderModuleName hole, string provider)
 
 backpackEntryJson :: BackpackEntry -> Json.Json
 backpackEntryJson entry =
@@ -116,20 +119,20 @@ backpackEntryJson entry =
     SignatureTypecheck unit path ->
       object
         [ ("kind", string (renderPlanArtifactKind SignatureTypecheckDrvArtifact))
-        , ("unit", string (indefiniteUnit unit))
+        , ("unit", string (renderUnitKey (indefiniteUnit unit)))
         , ("drvPlan", string path)
         ]
     SignatureInterface unit signature path ->
       object
         [ ("kind", string (renderPlanArtifactKind SignatureDrvArtifact))
-        , ("unit", string (indefiniteUnit unit))
-        , ("signature", string signature)
+        , ("unit", string (renderUnitKey (indefiniteUnit unit)))
+        , ("signature", string (renderModuleName signature))
         , ("drvPlan", string path)
         ]
     InstantiationPlan instantiation path ->
       object
         [ ("kind", string (renderPlanArtifactKind InstantiationDrvArtifact))
-        , ("unit", string (instantiationUnit instantiation))
+        , ("unit", string (renderUnitKey (instantiationUnit instantiation)))
         , ("instantiationKey", string (instantiationKey instantiation))
         , ("drvPlan", string path)
         ]
@@ -142,7 +145,7 @@ writeBackpackPlan out entry =
         ( object
             [ ("kind", string (renderPlanArtifactKind SignatureTypecheckDrvArtifact))
             , ("status", string (renderPlanStatus Planned))
-            , ("unit", string (indefiniteUnit unit))
+            , ("unit", string (renderUnitKey (indefiniteUnit unit)))
             ]
         )
     SignatureInterface unit signature path ->
@@ -150,8 +153,8 @@ writeBackpackPlan out entry =
         ( object
             [ ("kind", string (renderPlanArtifactKind SignatureDrvArtifact))
             , ("status", string (renderPlanStatus Planned))
-            , ("unit", string (indefiniteUnit unit))
-            , ("signature", string signature)
+            , ("unit", string (renderUnitKey (indefiniteUnit unit)))
+            , ("signature", string (renderModuleName signature))
             ]
         )
     InstantiationPlan instantiation path ->
@@ -159,9 +162,9 @@ writeBackpackPlan out entry =
         ( object
             [ ("kind", string (renderPlanArtifactKind InstantiationDrvArtifact))
             , ("status", string (renderPlanStatus Planned))
-            , ("unit", string (instantiationUnit instantiation))
+            , ("unit", string (renderUnitKey (instantiationUnit instantiation)))
             , ("instantiationKey", string (instantiationKey instantiation))
-            , ("holes", object (map (\(hole, provider) -> (hole, string provider)) (instantiationHoles instantiation)))
+            , ("holes", object (map (\(hole, provider) -> (renderModuleName hole, string provider)) (instantiationHoles instantiation)))
             ]
         )
   where
@@ -169,6 +172,6 @@ writeBackpackPlan out entry =
 
 instantiationKey :: ExpectedInstantiation -> String
 instantiationKey instantiation =
-  instantiationUnit instantiation
+  renderUnitKey (instantiationUnit instantiation)
     ++ "+"
-    ++ intercalate "," [hole ++ "=" ++ provider | (hole, provider) <- instantiationHoles instantiation]
+    ++ intercalate "," [renderModuleName hole ++ "=" ++ provider | (hole, provider) <- instantiationHoles instantiation]

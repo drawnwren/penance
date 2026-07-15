@@ -10,6 +10,9 @@ import Penance.Skeleton
   ( LocalComponent (..)
   , LocalPackage (..)
   , ProjectSkeleton (..)
+  , renderComponentId
+  , renderModuleName
+  , renderPkgName
   )
 import Penance.Plan (drvFileFor, writeJsonFile)
 import Penance.Types
@@ -50,13 +53,13 @@ emitBootstrap skeleton out = do
 packageEntries :: ProjectSkeleton -> [PackageEntry]
 packageEntries skeleton =
   [ PackageEntry
-      { entryName = packageName pkg
+      { entryName = renderPkgName (packageName pkg)
       , entryVersion = packageVersion pkg
       , entryComponents = packageComponentDetails pkg
-      , entryProvidedModules = packageProvidedModules pkg
-      , entrySignatures = packageSignatures pkg
-      , entryRequiredSignatures = packageRequiredSignatures pkg
-      , entryPath = "packages" </> packageName pkg </> drvFileFor "package"
+      , entryProvidedModules = map renderModuleName (packageProvidedModules pkg)
+      , entrySignatures = map renderModuleName (packageSignatures pkg)
+      , entryRequiredSignatures = map renderModuleName (packageRequiredSignatures pkg)
+      , entryPath = "packages" </> renderPkgName (packageName pkg) </> drvFileFor "package"
       }
   | pkg <- localPackages skeleton
   ]
@@ -66,8 +69,6 @@ packageGraphJson skeleton =
   object
     [ ("kind", string (renderPlanArtifactKind PackageGraphArtifact))
     , ("status", string (renderPlanStatus Planned))
-    , ("projectKey", string (projectKey skeleton))
-    , ("planCacheKey", string (planCacheKey skeleton))
     , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("packages", array (map packageEntryJson (packageEntries skeleton)))
     ]
@@ -87,11 +88,11 @@ packageEntryJson entry =
 componentJson :: LocalComponent -> Json.Json
 componentJson component =
   object
-    [ ("component", string (componentName component))
+    [ ("component", string (renderComponentId (componentName component)))
     , ("kind", string (renderComponentKind (componentKind component)))
-    , ("providedModules", array (map string (componentProvidedModules component)))
-    , ("signatures", array (map string (componentSignatures component)))
-    , ("requiredSignatures", array (map string (componentRequiredSignatures component)))
+    , ("providedModules", array (map (string . renderModuleName) (componentProvidedModules component)))
+    , ("signatures", array (map (string . renderModuleName) (componentSignatures component)))
+    , ("requiredSignatures", array (map (string . renderModuleName) (componentRequiredSignatures component)))
     , ("mixins", array (map string (componentMixins component)))
     , ("reexportedModules", array (map string (componentReexportedModules component)))
     ]

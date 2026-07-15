@@ -9,7 +9,15 @@ import Penance.Json (array, object, string)
 import Penance.Skeleton
   ( LocalComponent (..)
   , LocalPackage (..)
+  , ModuleName
   , ProjectSkeleton (..)
+  , UnitKey
+  , componentUnitKey
+  , moduleUnitKey
+  , renderComponentId
+  , renderModuleName
+  , renderPkgName
+  , renderUnitKey
   )
 import Penance.Plan (drvFileFor, writeJsonFile)
 import Penance.Types
@@ -25,15 +33,15 @@ import System.FilePath ((</>))
 data ModuleEntry = ModuleEntry
   { entryPackage :: String
   , entryComponent :: String
-  , entryModule :: String
-  , entryUnit :: String
+  , entryModule :: ModuleName
+  , entryUnit :: UnitKey
   , entryPath :: FilePath
   }
   deriving (Eq, Show)
 
 moduleDrvEntries :: ProjectSkeleton -> [(String, FilePath)]
 moduleDrvEntries skeleton =
-  [ (entryUnit entry ++ ":" ++ entryModule entry, entryPath entry)
+  [ (renderUnitKey (moduleUnitKey (entryUnit entry) (entryModule entry)), entryPath entry)
   | entry <- moduleEntries skeleton
   ]
 
@@ -47,14 +55,14 @@ emitBootstrap skeleton out = do
 moduleEntries :: ProjectSkeleton -> [ModuleEntry]
 moduleEntries skeleton =
   [ ModuleEntry
-      { entryPackage = packageName pkg
-      , entryComponent = componentName component
+      { entryPackage = renderPkgName (packageName pkg)
+      , entryComponent = renderComponentId (componentName component)
       , entryModule = moduleName
-      , entryUnit = packageName pkg ++ ":" ++ componentName component
+      , entryUnit = componentUnitKey (packageName pkg) (componentName component)
       , entryPath =
           "modules"
-            </> packageName pkg
-            </> drvFileFor (componentName component ++ ":" ++ moduleName)
+            </> renderPkgName (packageName pkg)
+            </> drvFileFor (renderUnitKey (moduleUnitKey (componentUnitKey (packageName pkg) (componentName component)) moduleName))
       }
   | pkg <- localPackages skeleton
   , component <- packageComponentDetails pkg
@@ -66,8 +74,6 @@ moduleGraphJson skeleton =
   object
     [ ("kind", string (renderPlanArtifactKind ModuleGraphArtifact))
     , ("status", string (renderPlanStatus Planned))
-    , ("projectKey", string (projectKey skeleton))
-    , ("planCacheKey", string (planCacheKey skeleton))
     , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("modules", array (map moduleEntryJson (moduleEntries skeleton)))
     ]
@@ -77,8 +83,8 @@ moduleEntryJson entry =
   object
     [ ("package", string (entryPackage entry))
     , ("component", string (entryComponent entry))
-    , ("module", string (entryModule entry))
-    , ("unit", string (entryUnit entry))
+    , ("module", string (renderModuleName (entryModule entry)))
+    , ("unit", string (renderUnitKey (entryUnit entry)))
     , ("drvPlan", string (entryPath entry))
     ]
 
@@ -93,7 +99,7 @@ writeModulePlan out entry = do
         , ("status", string (renderPlanStatus Planned))
         , ("package", string (entryPackage entry))
         , ("component", string (entryComponent entry))
-        , ("module", string (entryModule entry))
-        , ("unit", string (entryUnit entry))
+        , ("module", string (renderModuleName (entryModule entry)))
+        , ("unit", string (renderUnitKey (entryUnit entry)))
         ]
     )

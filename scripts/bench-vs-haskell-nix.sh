@@ -3,7 +3,8 @@ set -euo pipefail
 
 nix_bin="${PENANCE_NIX_BIN:-nix}"
 system="${1:-$("$nix_bin" eval --raw --impure --expr builtins.currentSystem)}"
-out_dir="${PENANCE_BENCH_OUT:-docs/bench-results}"
+flake_ref="${PENANCE_BENCH_FLAKE:-path:.}"
+out_dir="${PENANCE_BENCH_OUT:-.penance/bench-results}"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 result="$out_dir/vs-haskell-nix-$system-$stamp.tsv"
 
@@ -41,18 +42,18 @@ scenario	status	wall_seconds	log	command
 EOF
 
 run_metric penance_eval_module \
-  "$nix_bin" eval --raw ".#packages.$system.penanceBenchModule.drvPath"
+  "$nix_bin" eval --raw "$flake_ref#packages.$system.penanceBenchModule.drvPath"
 
 run_metric penance_eval_component \
-  "$nix_bin" eval --raw ".#packages.$system.penanceBenchComponent.drvPath"
+  "$nix_bin" eval --raw "$flake_ref#packages.$system.penanceBenchComponent.drvPath"
 
 run_metric penance_build_dry_run \
-  "$nix_bin" build --dry-run ".#packages.$system.penanceBenchModule"
+  "$nix_bin" build --dry-run "$flake_ref#packages.$system.penanceBenchModule"
 
 run_metric haskell_nix_eval_exe \
-  "$nix_bin" eval --raw ".#packages.$system.haskellNixBenchExe.drvPath"
+  "$nix_bin" eval --raw "$flake_ref#packages.$system.haskellNixBenchExe.drvPath"
 
 run_metric haskell_nix_build_dry_run \
-  "$nix_bin" build --dry-run ".#packages.$system.haskellNixBenchExe"
+  "$nix_bin" build --dry-run "$flake_ref#packages.$system.haskellNixBenchExe"
 
 printf 'wrote %s\n' "$result"

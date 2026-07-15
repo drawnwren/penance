@@ -1,19 +1,37 @@
 module Penance.Dyndrv
   ( emitBenchDyndrvFromArgs
+  , DrvPath
+  , StorePath
+  , DerivationSpec (..)
+  , derivationJson
+  , mergeInputs
+  , parseDrvPath
+  , parseStorePath
+  , renderDrvPath
+  , renderStorePath
+  , downstreamPlaceholderClearText
   )
 where
 
 import Control.Monad (foldM)
-import Data.List (intercalate, isSuffixOf, sort, sortOn)
+import Data.List (dropWhileEnd, intercalate, isPrefixOf, isSuffixOf, sort, sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
+import Penance.Error
+  ( throwArgumentError
+  , throwGraphError
+  , throwJsonError
+  , throwNixError
+  )
 import Penance.Json (Json (..), array, object, renderJson, string)
 import qualified Penance.Json as Json
+import Penance.Json.Decode (asArray, asObject, asString, field, stringArray)
+import qualified Penance.Sha256 as Sha256
 import Penance.Types (PackageDbKind (..), parsePackageDbKind)
-import System.Directory (removeFile)
-import System.Exit (ExitCode (..), die)
+import Penance.Utf8.IO (readUtf8File, writeUtf8File)
+import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeFileName)
-import System.IO (hClose, hPutStr, openTempFile)
 import System.Process (readProcessWithExitCode)
 
 data EmitOptions = EmitOptions
@@ -48,7 +66,7 @@ data RequiredOptions = RequiredOptions
   , reqPlaceholderOut :: String
   , reqPlaceholderHi :: String
   , reqPlaceholderO :: String
-  , reqToolDrvs :: [FilePath]
+  , reqToolDrvs :: [DrvPath]
   }
   deriving (Eq, Show)
 
@@ -60,29 +78,80 @@ data PlannedModule = PlannedModule
   }
   deriving (Eq, Show)
 
-data BuiltModule = BuiltModule
-  { bmHiDrv :: FilePath
-  , bmODrv :: FilePath
-  , bmHiPlaceholder :: String
-  , bmOPlaceholder :: String
-  , bmIsBoot :: Bool
+data BuiltIface = BuiltIface
+  { builtHiDrv :: DrvPath
+  , builtHiPlaceholder :: String
   }
   deriving (Eq, Show)
 
+data BuiltModule
+  = BuiltBoot BuiltIface
+  | BuiltObject
+      { builtObjectDrv :: DrvPath
+      , builtObjectPlaceholder :: String
+      , builtObjectIface :: Maybe BuiltIface
+      }
+  deriving (Eq, Show)
+
+newtype StorePath = StorePath FilePath
+  deriving (Eq, Ord, Show)
+
+newtype DrvPath = DrvPath FilePath
+  deriving (Eq, Ord, Show)
+
+renderStorePath :: StorePath -> FilePath
+renderStorePath (StorePath path) = path
+
+renderDrvPath :: DrvPath -> FilePath
+renderDrvPath (DrvPath path) = path
+
+parseStorePath :: FilePath -> Either String StorePath
+parseStorePath path
+  | "/nix/store/" `isPrefixOf` path = Right (StorePath path)
+  | otherwise = Left ("expected a Nix store path, got: " ++ path)
+
+parseDrvPath :: FilePath -> Either String DrvPath
+parseDrvPath path
+  | ".drv" `isSuffixOf` path = DrvPath . renderStorePath <$> parseStorePath path
+  | otherwise = Left ("expected a Nix derivation path, got: " ++ path)
+
+data DerivationSpec = DerivationSpec
+  { derivationName :: String
+  , derivationSystem :: String
+  , derivationBuilder :: FilePath
+  , derivationArgs :: [String]
+  , derivationEnv :: [(String, Json)]
+  , derivationInputDrvs :: Map.Map DrvPath [String]
+  , derivationInputSrcs :: [StorePath]
+  , derivationOutputs :: [(String, Json)]
+  }
+  deriving (Eq, Show)
+
+data ObjectArgs = ObjectArgs
+  { objectOptions :: RequiredOptions
+  , objectFlags :: [String]
+  , objectModule :: PlannedModule
+  , objectNeedsDynamic :: Bool
+  , objectSource :: StorePath
+  , objectDependencyIfaces :: [String]
+  , objectDependencyObjects :: [String]
+  }
+
 emitBenchDyndrvFromArgs :: [String] -> IO ()
 emitBenchDyndrvFromArgs args = do
-  options <- requireOptions (parseOptions emptyOptions args)
+  parsed <- either throwArgumentError pure (parseOptions emptyOptions args)
+  options <- requireOptions parsed
   modules <- readModulePlan (reqModulePlan options)
-  flags <- filter (not . null) . lines <$> readFile (reqGhcFlags options)
-  let dependencySet = Set.fromList (concatMap pmDeps modules)
+  flags <- filter (not . null) . lines <$> readUtf8File (reqGhcFlags options)
+  let modulesBySource = Map.fromList [(pmSource modulePlan, modulePlan) | modulePlan <- modules]
+      dependencySet = Set.fromList (concatMap pmDeps modules)
       dynamicObjectSet =
-        Set.fromList
-          [ dep
+        Set.unions
+          [ transitiveDependencies modulesBySource modulePlan
           | modulePlan <- modules
           , pmDb modulePlan == FullPackageDb
-          , dep <- pmDeps modulePlan
           ]
-  built <- foldM (emitModule options flags dependencySet dynamicObjectSet) Map.empty modules
+  built <- foldM (emitModule options flags modulesBySource dependencySet dynamicObjectSet) Map.empty modules
   rootDrv <- emitAssemble options flags (Map.elems built)
   copyDrvText rootDrv (reqOut options)
 
@@ -105,10 +174,10 @@ emptyOptions =
     , optToolDrvs = []
     }
 
-parseOptions :: EmitOptions -> [String] -> EmitOptions
+parseOptions :: EmitOptions -> [String] -> Either String EmitOptions
 parseOptions options args =
   case args of
-    [] -> options
+    [] -> Right options
     "--module-plan" : value : rest -> parseOptions options {optModulePlan = Just value} rest
     "--src-root" : value : rest -> parseOptions options {optSrcRoot = Just value} rest
     "--out" : value : rest -> parseOptions options {optOut = Just value} rest
@@ -123,7 +192,7 @@ parseOptions options args =
     "--placeholder-hi" : value : rest -> parseOptions options {optPlaceholderHi = Just value} rest
     "--placeholder-o" : value : rest -> parseOptions options {optPlaceholderO = Just value} rest
     "--tool-drv" : value : rest -> parseOptions options {optToolDrvs = optToolDrvs options ++ [value]} rest
-    flag : _ -> error ("unknown emit-bench-dyndrv option: " ++ flag)
+    flag : _ -> Left ("unknown emit-bench-dyndrv option: " ++ flag)
 
 requireOptions :: EmitOptions -> IO RequiredOptions
 requireOptions options = do
@@ -140,6 +209,7 @@ requireOptions options = do
   placeholderOut <- maybe (selfOutputPlaceholder nixBin "out") pure (optPlaceholderOut options)
   placeholderHi <- maybe (selfOutputPlaceholder nixBin "hi") pure (optPlaceholderHi options)
   placeholderO <- maybe (selfOutputPlaceholder nixBin "o") pure (optPlaceholderO options)
+  toolDrvs <- traverse (either throwNixError pure . parseDrvPath) (optToolDrvs options)
   pure
     RequiredOptions
       { reqModulePlan = modulePlan
@@ -155,17 +225,17 @@ requireOptions options = do
       , reqPlaceholderOut = placeholderOut
       , reqPlaceholderHi = placeholderHi
       , reqPlaceholderO = placeholderO
-      , reqToolDrvs = optToolDrvs options
+      , reqToolDrvs = toolDrvs
       }
   where
     required name =
-      maybe (die ("missing required --" ++ name)) pure
+      maybe (throwArgumentError ("missing required --" ++ name)) pure
 
 readModulePlan :: FilePath -> IO [PlannedModule]
 readModulePlan path = do
-  contents <- readFile path
+  contents <- readUtf8File path
   case Json.parseJson contents >>= decodeModulePlan of
-    Left err -> die ("failed to parse module plan " ++ path ++ ": " ++ err)
+    Left err -> throwJsonError ("failed to parse module plan " ++ path ++ ": " ++ err)
     Right modules -> pure modules
 
 decodeModulePlan :: Json -> Either String [PlannedModule]
@@ -189,8 +259,18 @@ decodeModule value = do
       , pmIsBoot = ".hs-boot" `isSuffixOf` source
       }
 
-emitModule :: RequiredOptions -> [String] -> Set.Set FilePath -> Set.Set FilePath -> Map.Map FilePath BuiltModule -> PlannedModule -> IO (Map.Map FilePath BuiltModule)
-emitModule options flags dependencySet dynamicObjectSet built modulePlan = do
+transitiveDependencies :: Map.Map FilePath PlannedModule -> PlannedModule -> Set.Set FilePath
+transitiveDependencies modulesBySource root = go Set.empty (pmDeps root)
+  where
+    go seen [] = seen
+    go seen (source : rest)
+      | source `Set.member` seen = go seen rest
+      | otherwise =
+          let nested = maybe [] pmDeps (Map.lookup source modulesBySource)
+           in go (Set.insert source seen) (nested ++ rest)
+
+emitModule :: RequiredOptions -> [String] -> Map.Map FilePath PlannedModule -> Set.Set FilePath -> Set.Set FilePath -> Map.Map FilePath BuiltModule -> PlannedModule -> IO (Map.Map FilePath BuiltModule)
+emitModule options flags modulesBySource dependencySet dynamicObjectSet built modulePlan = do
   let sourcePath = reqSrcRoot options </> pmSource modulePlan
       moduleName = sanitizeName (pmSource modulePlan)
       ifaceName = "penance-dyndrv-iface-" ++ moduleName
@@ -198,106 +278,129 @@ emitModule options flags dependencySet dynamicObjectSet built modulePlan = do
       needsFull = pmDb modulePlan == FullPackageDb
       needsIface = pmSource modulePlan `Set.member` dependencySet
       needsDynamicObject = needsFull || pmSource modulePlan `Set.member` dynamicObjectSet
-  addedObjectSource <- runNix options ["store", "add-path", sourcePath]
+  addedObjectSourceText <- runNix options ["store", "add-path", sourcePath]
+  addedObjectSource <- either throwNixError pure (parseStorePath addedObjectSourceText)
   depModules <- traverse (lookupDep built (pmSource modulePlan)) (pmDeps modulePlan)
-  let depHiPlaceholders = map bmHiPlaceholder depModules
-      objectDepModules = filter (not . bmIsBoot) depModules
-      depOPlaceholders = if needsFull then map bmOPlaceholder objectDepModules else []
+  transitiveObjectModules <-
+    if needsDynamicObject
+      then
+        traverse
+          (lookupDep built (pmSource modulePlan))
+          (Set.toAscList (transitiveDependencies modulesBySource modulePlan))
+      else pure []
+  let compileDepModules = if needsDynamicObject then transitiveObjectModules else depModules
+  directDepIfaces <- traverse (requireBuiltIface (pmSource modulePlan)) depModules
+  compileDepIfaces <- traverse (requireBuiltIface (pmSource modulePlan)) compileDepModules
+  let directDepHiPlaceholders = map builtHiPlaceholder directDepIfaces
+      compileDepHiPlaceholders = map builtHiPlaceholder compileDepIfaces
+      objectDeps = mapMaybe builtObjectOutput transitiveObjectModules
+      depOPlaceholders = if needsDynamicObject then map snd objectDeps else []
       bootIfaceInputs =
         mergeInputs
-          (toolInputs options ++ [(bmHiDrv dep, ["hi"]) | dep <- depModules])
+          (toolInputs options ++ [(builtHiDrv dep, ["hi"]) | dep <- directDepIfaces])
       objectInputs =
         mergeInputs
-          (toolInputs options ++ [(bmHiDrv dep, ["hi"]) | dep <- depModules] ++ [(bmODrv dep, ["o"]) | dep <- objectDepModules, needsFull])
+          ( toolInputs options
+              ++ [(builtHiDrv dep, ["hi"]) | dep <- compileDepIfaces]
+              ++ [(drv, ["o"]) | (drv, _placeholder) <- objectDeps, needsDynamicObject]
+          )
       objectJson =
         derivationJson
-          objectName
-          (reqSystem options)
-          (reqBuilder options)
-          (objectArgs options flags modulePlan needsDynamicObject addedObjectSource depHiPlaceholders depOPlaceholders)
-          ( moduleEnv
-              options
-              objectName
-              [ ("o", reqPlaceholderO options)
-              , ("src", addedObjectSource)
-              ]
-          )
-          objectInputs
-          [takeFileName addedObjectSource]
-          (caOutputs ["o"])
+          DerivationSpec
+            { derivationName = objectName
+            , derivationSystem = reqSystem options
+            , derivationBuilder = reqBuilder options
+            , derivationArgs =
+                objectArgs
+                  ObjectArgs
+                    { objectOptions = options
+                    , objectFlags = flags
+                    , objectModule = modulePlan
+                    , objectNeedsDynamic = needsDynamicObject
+                    , objectSource = addedObjectSource
+                    , objectDependencyIfaces = compileDepHiPlaceholders
+                    , objectDependencyObjects = depOPlaceholders
+                    }
+            , derivationEnv =
+                moduleEnv
+                  options
+                  objectName
+                  [ ("o", reqPlaceholderO options)
+                  , ("src", renderStorePath addedObjectSource)
+                  ]
+            , derivationInputDrvs = objectInputs
+            , derivationInputSrcs = [addedObjectSource]
+            , derivationOutputs = caOutputs ["o"]
+            }
   if pmIsBoot modulePlan
     then do
       let ifaceJson =
             derivationJson
-              ifaceName
-              (reqSystem options)
-              (reqBuilder options)
-              (bootIfaceArgs options flags modulePlan addedObjectSource depHiPlaceholders)
-              ( moduleEnv
-                  options
-                  ifaceName
-                  [ ("hi", reqPlaceholderHi options)
-                  , ("src", addedObjectSource)
-                  ]
-              )
-              bootIfaceInputs
-              [takeFileName addedObjectSource]
-              (caOutputs ["hi"])
+              DerivationSpec
+                { derivationName = ifaceName
+                , derivationSystem = reqSystem options
+                , derivationBuilder = reqBuilder options
+                , derivationArgs = bootIfaceArgs options flags modulePlan addedObjectSource directDepHiPlaceholders
+                , derivationEnv =
+                    moduleEnv
+                      options
+                      ifaceName
+                      [ ("hi", reqPlaceholderHi options)
+                      , ("src", renderStorePath addedObjectSource)
+                      ]
+                , derivationInputDrvs = bootIfaceInputs
+                , derivationInputSrcs = [addedObjectSource]
+                , derivationOutputs = caOutputs ["hi"]
+                }
       hiDrv <- addDerivation options ifaceJson
-      hiPlaceholder <- downstreamPlaceholder options hiDrv "hi"
+      hiPlaceholder <- downstreamPlaceholder hiDrv "hi"
       pure
-        ( Map.insert
-            (pmSource modulePlan)
-            BuiltModule
-              { bmHiDrv = hiDrv
-              , bmODrv = ""
-              , bmHiPlaceholder = hiPlaceholder
-              , bmOPlaceholder = ""
-              , bmIsBoot = True
-              }
-            built
-        )
+          ( Map.insert
+              (pmSource modulePlan)
+              (BuiltBoot (BuiltIface hiDrv hiPlaceholder))
+              built
+          )
     else do
       oDrv <- addDerivation options objectJson
-      oPlaceholder <- downstreamPlaceholder options oDrv "o"
-      (hiDrv, hiPlaceholder) <-
+      oPlaceholder <- downstreamPlaceholder oDrv "o"
+      builtIface <-
         if needsIface
           then do
             let ifaceInputs =
                   mergeInputs
                     ( toolInputs options
                         ++ [(oDrv, ["o"])]
-                        ++ [(bmHiDrv dep, ["hi"]) | dep <- depModules]
+                        ++ [(builtHiDrv dep, ["hi"]) | dep <- directDepIfaces]
                     )
                 ifaceJson =
                   derivationJson
-                    ifaceName
-                    (reqSystem options)
-                    (reqBuilder options)
-                    (ifaceArgs options depHiPlaceholders)
-                    ( moduleEnv
-                        options
-                        ifaceName
-                        [ ("hi", reqPlaceholderHi options)
-                        , ("real_o", oPlaceholder)
-                        ]
-                    )
-                    ifaceInputs
-                    []
-                    (caOutputs ["hi"])
+                    DerivationSpec
+                      { derivationName = ifaceName
+                      , derivationSystem = reqSystem options
+                      , derivationBuilder = reqBuilder options
+                      , derivationArgs = ifaceArgs options directDepHiPlaceholders
+                      , derivationEnv =
+                          moduleEnv
+                            options
+                            ifaceName
+                            [ ("hi", reqPlaceholderHi options)
+                            , ("real_o", oPlaceholder)
+                            ]
+                      , derivationInputDrvs = ifaceInputs
+                      , derivationInputSrcs = []
+                      , derivationOutputs = caOutputs ["hi"]
+                      }
             drv <- addDerivation options ifaceJson
-            placeholder <- downstreamPlaceholder options drv "hi"
-            pure (drv, placeholder)
-          else pure ("", "")
+            placeholder <- downstreamPlaceholder drv "hi"
+            pure (Just (BuiltIface drv placeholder))
+          else pure Nothing
       pure
         ( Map.insert
             (pmSource modulePlan)
-            BuiltModule
-              { bmHiDrv = hiDrv
-              , bmODrv = oDrv
-              , bmHiPlaceholder = hiPlaceholder
-              , bmOPlaceholder = oPlaceholder
-              , bmIsBoot = False
+            BuiltObject
+              { builtObjectDrv = oDrv
+              , builtObjectPlaceholder = oPlaceholder
+              , builtObjectIface = builtIface
               }
             built
         )
@@ -306,34 +409,43 @@ lookupDep :: Map.Map FilePath BuiltModule -> FilePath -> FilePath -> IO BuiltMod
 lookupDep built current dep =
   case Map.lookup dep built of
     Just value -> pure value
-    Nothing -> die ("module plan is not topologically sorted: " ++ current ++ " depends on missing " ++ dep)
+    Nothing -> throwGraphError ("module plan is not topologically sorted: " ++ current ++ " depends on missing " ++ dep)
 
-emitAssemble :: RequiredOptions -> [String] -> [BuiltModule] -> IO FilePath
+requireBuiltIface :: FilePath -> BuiltModule -> IO BuiltIface
+requireBuiltIface _ (BuiltBoot iface) = pure iface
+requireBuiltIface _ BuiltObject {builtObjectIface = Just iface} = pure iface
+requireBuiltIface current BuiltObject {builtObjectIface = Nothing} =
+  throwGraphError ("module plan omitted a required interface dependency while building " ++ current)
+
+builtObjectOutput :: BuiltModule -> Maybe (DrvPath, String)
+builtObjectOutput (BuiltBoot _) = Nothing
+builtObjectOutput BuiltObject {builtObjectDrv = drv, builtObjectPlaceholder = placeholder} =
+  Just (drv, placeholder)
+
+emitAssemble :: RequiredOptions -> [String] -> [BuiltModule] -> IO DrvPath
 emitAssemble options flags modules = do
   let name = "penance-bench-dyndrv-assemble"
-      sortedModules = sortOnDrv (filter (not . bmIsBoot) modules)
-      inputDrvs = mergeInputs (toolInputs options ++ [(bmODrv module_, ["o"]) | module_ <- sortedModules])
-      outputPlaceholders = map bmOPlaceholder sortedModules
+      sortedObjects = sortOn fst (mapMaybe builtObjectOutput modules)
+      inputDrvs = mergeInputs (toolInputs options ++ [(drv, ["o"]) | (drv, _placeholder) <- sortedObjects])
+      outputPlaceholders = map snd sortedObjects
       json =
         derivationJson
-          name
-          (reqSystem options)
-          (reqBuilder options)
-          (assembleArgs options flags outputPlaceholders)
-          ( moduleEnv
-              options
-              name
-              [ ("out", reqPlaceholderOut options)
-              ]
-          )
-          inputDrvs
-          []
-          (caOutputs ["out"])
+          DerivationSpec
+            { derivationName = name
+            , derivationSystem = reqSystem options
+            , derivationBuilder = reqBuilder options
+            , derivationArgs = assembleArgs options flags outputPlaceholders
+            , derivationEnv =
+                moduleEnv
+                  options
+                  name
+                  [ ("out", reqPlaceholderOut options)
+                  ]
+            , derivationInputDrvs = inputDrvs
+            , derivationInputSrcs = []
+            , derivationOutputs = caOutputs ["out"]
+            }
   addDerivation options json
-
-sortOnDrv :: [BuiltModule] -> [BuiltModule]
-sortOnDrv =
-  sortByKey bmODrv
 
 ifaceArgs :: RequiredOptions -> [String] -> [String]
 ifaceArgs options depHiPlaceholders =
@@ -356,7 +468,7 @@ ifaceArgs options depHiPlaceholders =
       ]
   ]
 
-bootIfaceArgs :: RequiredOptions -> [String] -> PlannedModule -> FilePath -> [String] -> [String]
+bootIfaceArgs :: RequiredOptions -> [String] -> PlannedModule -> StorePath -> [String] -> [String]
 bootIfaceArgs options flags modulePlan addedSource depHiPlaceholders =
   [ "-euc"
   , unlines
@@ -385,8 +497,8 @@ bootIfaceArgs options flags modulePlan addedSource depHiPlaceholders =
   where
     _ = addedSource
 
-objectArgs :: RequiredOptions -> [String] -> PlannedModule -> Bool -> FilePath -> [String] -> [String] -> [String]
-objectArgs options flags modulePlan needsDynamicObject addedSource depHiPlaceholders depOPlaceholders =
+objectArgs :: ObjectArgs -> [String]
+objectArgs spec =
   [ "-euc"
   , unlines
       [ "set -euo pipefail"
@@ -403,7 +515,11 @@ objectArgs options flags modulePlan needsDynamicObject addedSource depHiPlacehol
       , "done"
       , "chmod -R u+w object-build"
       , "for dep_o in \"${dep_o_dirs[@]}\"; do"
-      , "  cp -R \"$dep_o\"/. object-build/"
+      , "  while IFS= read -r artifact; do"
+      , "    rel=\"${artifact#$dep_o/}\""
+      , "    mkdir -p \"object-build/$(dirname \"$rel\")\""
+      , "    cp \"$artifact\" \"object-build/$rel\""
+      , "  done < <(find \"$dep_o\" \\( -name '*.o' -o -name '*.dyn_o' -o -name '*.dyn_hi' \\) -type f | sort)"
       , "  chmod -R u+w object-build"
       , "done"
       , "chmod -R u+w object-build"
@@ -420,7 +536,13 @@ objectArgs options flags modulePlan needsDynamicObject addedSource depHiPlacehol
       ]
   ]
   where
-    _ = addedSource
+    options = objectOptions spec
+    flags = objectFlags spec
+    modulePlan = objectModule spec
+    needsDynamicObject = objectNeedsDynamic spec
+    depHiPlaceholders = objectDependencyIfaces spec
+    depOPlaceholders = objectDependencyObjects spec
+    _ = objectSource spec
 
 assembleArgs :: RequiredOptions -> [String] -> [String] -> [String]
 assembleArgs options flags moduleOPlaceholders =
@@ -452,37 +574,28 @@ moduleEnv options name extras =
   ]
     ++ [(key, string value) | (key, value) <- extras]
 
-derivationJson ::
-  String ->
-  String ->
-  FilePath ->
-  [String] ->
-  [(String, Json)] ->
-  Map.Map FilePath [String] ->
-  [String] ->
-  [(String, Json)] ->
-  Json
-derivationJson name system builder args env inputDrvs inputSrcs outputs =
+derivationJson :: DerivationSpec -> Json
+derivationJson spec =
   object
-    [ ("name", string name)
-    , ("system", string system)
-    , ("builder", string builder)
-    , ("args", array (map string args))
-    , ("env", object env)
+    [ ("name", string (derivationName spec))
+    , ("system", string (derivationSystem spec))
+    , ("builder", string (derivationBuilder spec))
+    , ("args", array (map string (derivationArgs spec)))
+    , ("env", object (derivationEnv spec))
     , ( "inputs"
       , object
-          [ ("drvs", inputDrvsJson inputDrvs)
-          , ("srcs", array (map string (sort inputSrcs)))
+          [ ("drvs", inputDrvsJson (derivationInputDrvs spec))
+          , ("srcs", array (map (string . takeFileName . renderStorePath) (sort (derivationInputSrcs spec))))
           ]
       )
-    , ("outputs", object outputs)
+    , ("outputs", object (derivationOutputs spec))
     , ("version", JsonNumber "4")
     ]
 
-inputDrvsJson :: Map.Map FilePath [String] -> Json
+inputDrvsJson :: Map.Map DrvPath [String] -> Json
 inputDrvsJson inputDrvs =
   object
-    [ ( takeFileName drv
+    [ ( takeFileName (renderDrvPath drv)
       , object
           [ ("dynamicOutputs", object [])
           , ("outputs", array (map string outputs))
@@ -502,58 +615,54 @@ caOutputs outputs =
   | output <- outputs
   ]
 
-toolInputs :: RequiredOptions -> [(FilePath, [String])]
+toolInputs :: RequiredOptions -> [(DrvPath, [String])]
 toolInputs options =
   [(drv, ["out"]) | drv <- reqToolDrvs options]
 
-mergeInputs :: [(FilePath, [String])] -> Map.Map FilePath [String]
+mergeInputs :: [(DrvPath, [String])] -> Map.Map DrvPath [String]
 mergeInputs =
   Map.map Set.toAscList . foldr insertOne Map.empty
   where
     insertOne (drv, outputs) =
       Map.insertWith Set.union drv (Set.fromList outputs)
 
-addDerivation :: RequiredOptions -> Json -> IO FilePath
+addDerivation :: RequiredOptions -> Json -> IO DrvPath
 addDerivation options json = do
   let text = renderJson json ++ "\n"
-  withTempText "penance-dyndrv-child.json" text $ \path ->
-    runNix options ["derivation", "add", "<", path]
+  result <- runCommandTrim (reqNixBin options) ["derivation", "add"] text
+  either throwNixError pure (parseDrvPath result)
 
-copyDrvText :: FilePath -> FilePath -> IO ()
+copyDrvText :: DrvPath -> FilePath -> IO ()
 copyDrvText drv out = do
-  contents <- readFile drv
-  writeFile out contents
+  contents <- readUtf8File (renderDrvPath drv)
+  writeUtf8File out contents
 
-downstreamPlaceholder :: RequiredOptions -> FilePath -> String -> IO String
-downstreamPlaceholder options drv output = do
+downstreamPlaceholder :: DrvPath -> String -> IO String
+downstreamPlaceholder drv output = do
+  clearText <- either throwNixError pure (downstreamPlaceholderClearText drv output)
+  pure ("/" ++ Sha256.renderNixBase32Sha256 (Sha256.nixBase32Sha256 clearText))
+
+downstreamPlaceholderClearText :: DrvPath -> String -> Either String String
+downstreamPlaceholderClearText drv output = do
   (hashPart, drvName) <- parseDrvStorePath drv
   let pathName =
         if output == "out" then drvName else drvName ++ "-" ++ output
-      clearText =
-        "nix-upstream-output:" ++ hashPart ++ ":" ++ pathName
-  ("/" ++) <$> nixBase32Sha256 options clearText
+  pure ("nix-upstream-output:" ++ hashPart ++ ":" ++ pathName)
 
-parseDrvStorePath :: FilePath -> IO (String, String)
-parseDrvStorePath path =
+parseDrvStorePath :: DrvPath -> Either String (String, String)
+parseDrvStorePath drv =
   case break (== '-') (takeFileName path) of
     (hashPart, '-' : rest)
       | ".drv" `isSuffixOf` rest ->
-          pure (hashPart, dropSuffix ".drv" rest)
+          Right (hashPart, dropSuffix ".drv" rest)
     _ ->
-      die ("expected a /nix/store hash-name.drv path, got: " ++ path)
-
-nixBase32Sha256 :: RequiredOptions -> String -> IO String
-nixBase32Sha256 options text =
-  nixBase32Sha256WithNix (reqNixBin options) text
+      Left ("expected a /nix/store hash-name.drv path, got: " ++ path)
+  where
+    path = renderDrvPath drv
 
 selfOutputPlaceholder :: FilePath -> String -> IO String
-selfOutputPlaceholder nixBin output =
-  ("/" ++) <$> nixBase32Sha256WithNix nixBin ("nix-output:" ++ output)
-
-nixBase32Sha256WithNix :: FilePath -> String -> IO String
-nixBase32Sha256WithNix nixBin text =
-  withTempText "penance-placeholder-input" text $ \path ->
-    runCommandTrim nixBin ["hash", "file", "--type", "sha256", "--base32", path] ""
+selfOutputPlaceholder _ output =
+  pure ("/" ++ Sha256.renderNixBase32Sha256 (Sha256.nixBase32Sha256 ("nix-output:" ++ output)))
 
 runNix :: RequiredOptions -> [String] -> IO String
 runNix options args = do
@@ -563,52 +672,17 @@ runNix options args = do
 runCommandTrim :: FilePath -> [String] -> String -> IO String
 runCommandTrim command args stdinText = do
   (exitCode, stdoutText, stderrText) <-
-    case args of
-      ["derivation", "add", "<", path] ->
-        readProcessWithExitCode command ["derivation", "add"] =<< readFile path
-      _ ->
-        readProcessWithExitCode command args stdinText
+    readProcessWithExitCode command args stdinText
   case exitCode of
     ExitSuccess -> pure (trim stdoutText)
     ExitFailure code ->
-      die
+      throwNixError
         ( intercalate
             "\n"
             [ "command failed with exit " ++ show code ++ ": " ++ unwords (command : args)
             , stderrText
             ]
         )
-
-withTempText :: FilePath -> String -> (FilePath -> IO a) -> IO a
-withTempText template contents action = do
-  (path, handle) <- openTempFile "." template
-  hPutStr handle contents
-  hClose handle
-  result <- action path
-  removeFile path
-  pure result
-
-field :: String -> [(String, Json)] -> Either String Json
-field name fields =
-  case lookup name fields of
-    Just value -> Right value
-    Nothing -> Left ("missing required JSON field `" ++ name ++ "`")
-
-asObject :: String -> Json -> Either String [(String, Json)]
-asObject _ (JsonObject fields) = Right fields
-asObject context other = Left ("expected object for " ++ context ++ ", got " ++ show other)
-
-asArray :: String -> Json -> Either String [Json]
-asArray _ (JsonArray values) = Right values
-asArray context other = Left ("expected array for " ++ context ++ ", got " ++ show other)
-
-asString :: String -> Json -> Either String String
-asString _ (JsonString value) = Right value
-asString context other = Left ("expected string for " ++ context ++ ", got " ++ show other)
-
-stringArray :: String -> Json -> Either String [String]
-stringArray context value =
-  asArray context value >>= traverse (asString context)
 
 bashArray :: String -> [String] -> String
 bashArray name values =
@@ -631,10 +705,6 @@ sanitizeName =
       | ch >= '0' && ch <= '9' = ch
       | otherwise = '-'
 
-sortByKey :: Ord key => (a -> key) -> [a] -> [a]
-sortByKey =
-  sortOn
-
 dropSuffix :: String -> String -> String
 dropSuffix suffix value
   | suffix `isSuffixOf` value = take (length value - length suffix) value
@@ -643,10 +713,6 @@ dropSuffix suffix value
 trim :: String -> String
 trim =
   dropWhileEnd isSpaceLike . dropWhile isSpaceLike
-
-dropWhileEnd :: (a -> Bool) -> [a] -> [a]
-dropWhileEnd predicate =
-  reverse . dropWhile predicate . reverse
 
 isSpaceLike :: Char -> Bool
 isSpaceLike ch =

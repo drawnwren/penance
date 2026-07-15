@@ -1,0 +1,21 @@
+cabal-version: 3.8
+name: multi-instance-external
+version: 0.1.0.0
+build-type: Simple
+license: NONE
+
+executable consumer-enabled
+  main-is: Main.hs
+  hs-source-dirs: app-enabled
+  build-depends:
+    base >=4.20 && <5,
+    hashable ==1.5.0.0
+  default-language: GHC2021
+
+executable consumer-disabled
+  main-is: Main.hs
+  hs-source-dirs: app-disabled
+  build-depends:
+    base >=4.20 && <5,
+    hashable ==1.5.0.0
+  default-language: GHC2021

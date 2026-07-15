@@ -1,0 +1,14 @@
+cabal-version: 3.8
+name: local-th-consumer
+version: 0.1.0.0
+build-type: Simple
+license: NONE
+
+executable local-th-consumer
+  main-is: Main.hs
+  hs-source-dirs: app
+  build-depends:
+    base >=4.20 && <5,
+    local-th-producer,
+    template-haskell
+  default-language: GHC2021

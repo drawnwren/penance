@@ -27,8 +27,6 @@ indexJson skeleton =
   object
     [ ("kind", string (renderPlanArtifactKind DrvIndexArtifact))
     , ("status", string (renderPlanStatus Planned))
-    , ("projectKey", string (projectKey skeleton))
-    , ("planCacheKey", string (planCacheKey skeleton))
     , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("packages", entryArray (Package.packagePlanEntries skeleton))
     , ("components", entryArray (Component.componentDrvEntries skeleton))
@@ -41,8 +39,6 @@ graphPlanJson skeleton =
   object
     [ ("kind", string (renderPlanArtifactKind GraphPlanArtifact))
     , ("status", string (renderPlanStatus Planned))
-    , ("projectKey", string (projectKey skeleton))
-    , ("planCacheKey", string (planCacheKey skeleton))
     , ("granularity", string (renderGranularity (granularity skeleton)))
     , ("rootFiles", rootFilesJson)
     , ("expectedOutputs", expectedOutputsJson (expectedOutputs skeleton))

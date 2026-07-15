@@ -54,13 +54,13 @@
       "id": "M2-lowerer-equality",
       "milestone": "M2",
       "title": "Wasm and pure-Nix lowerer equality",
-      "status": "failing",
+      "status": "proof",
       "comparison": "wasm-nix-lowerer-golden-equality",
-      "penanceAttr": null,
+      "penanceAttr": "penanceLowererEquality",
       "haskellNixAttr": null,
       "required": true,
-      "failure": "The eval layer does not yet prove that the Wasm lowerer and pure-Nix lowerer produce deepSeq-equal attrsets for committed lock fixtures.",
-      "notes": "Add golden equality fixtures for ordinary units, target divergence, and Backpack lock data once both lowerers exist."
+      "failure": null,
+      "notes": "DeepSeq-compares the typed GHC-Wasm lock lowerer with the pure-Nix lock lowerer for simple-lib, an external Hackage unit, and the benchmark component graph. A compiler-field mutation is the negative twin."
     },
     {
       "id": "M2-dev-shell-zero-external-builds",

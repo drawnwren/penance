@@ -110,7 +110,7 @@ renderSourceKind :: SourceKind -> String
 renderSourceKind RegularSource = "regular"
 
 data PenanceSchema
-  = LockSchemaV1
+  = LockSchemaV2
   | ModulePlanSchemaV1
   | ArchitecturePhaseMatrixSchemaV1
   | ArchitecturePhaseBenchSchemaV1
@@ -121,7 +121,7 @@ data PenanceSchema
 renderPenanceSchema :: PenanceSchema -> String
 renderPenanceSchema schema =
   case schema of
-    LockSchemaV1 -> "penance/lock/1"
+    LockSchemaV2 -> "penance/lock/2"
     ModulePlanSchemaV1 -> "penance/module-plan/1"
     ArchitecturePhaseMatrixSchemaV1 -> "penance/architecture-phase-matrix/1"
     ArchitecturePhaseBenchSchemaV1 -> "penance/architecture-phase-bench/1"
@@ -191,6 +191,7 @@ renderPackageDbKind kind =
 
 data PhaseStatus
   = ComparisonPhase
+  | ProofPhase
   | FailingPhase
   deriving (Eq, Ord, Show)
 
@@ -198,6 +199,7 @@ parsePhaseStatus :: String -> Either String PhaseStatus
 parsePhaseStatus value =
   case value of
     "comparison" -> Right ComparisonPhase
+    "proof" -> Right ProofPhase
     "failing" -> Right FailingPhase
     _ -> Left ("unsupported phase status `" ++ value ++ "`")
 
@@ -205,6 +207,7 @@ renderPhaseStatus :: PhaseStatus -> String
 renderPhaseStatus status =
   case status of
     ComparisonPhase -> "comparison"
+    ProofPhase -> "proof"
     FailingPhase -> "failing"
 
 data BenchmarkBackend

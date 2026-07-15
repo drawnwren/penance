@@ -8,11 +8,11 @@
       "title": "Cabal project translation",
       "status": "comparison",
       "comparison": "repent-vs-haskell-nix-cabal-project-plan",
-      "penanceAttr": "repentBench",
+      "penanceAttr": "repentBenchPlan",
       "haskellNixAttr": "haskellNixBenchPlan",
       "required": true,
       "failure": null,
-      "notes": "Tracks haskell.nix cabalProject' / plan-nix baseline against the current penance committed-lock path."
+      "notes": "Measures one repent solver run that writes the checked benchmark lock against one haskell.nix cabalProject' / plan-nix output. The broader lock correctness proof remains checks.repent-lock-proof."
     },
     {
       "id": "HN-component-builds",

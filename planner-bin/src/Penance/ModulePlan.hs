@@ -1,21 +1,26 @@
 module Penance.ModulePlan
   ( writeModulePlan
+  , languagePragmas
+  , hasAnnPragma
+  , needsDbFullFor
   )
 where
 
-import Data.Char (isSpace)
-import Data.List (isPrefixOf, isSuffixOf)
+import Data.Char (isSpace, toLower)
+import Data.List (dropWhileEnd, isPrefixOf, isSuffixOf, stripPrefix)
 import qualified Data.Set as Set
+import Penance.Error (throwJsonError)
 import Penance.GhcMakefile (ModuleDep (..), moduleGraphFromMakefile)
 import Penance.Json (Json (..), array, bool, object, renderJson, string)
 import qualified Penance.Json as Json
+import Penance.Json.Decode (asArray, asObject, asString, field, stringArray)
 import Penance.Types
   ( PackageDbKind (..)
   , PenanceSchema (..)
   , renderPackageDbKind
   , renderPenanceSchema
   )
-import System.Exit (die)
+import Penance.Utf8.IO (readUtf8File, writeUtf8File)
 
 data LockComponent = LockComponent
   { lockComponentName :: String
@@ -38,13 +43,13 @@ writeModulePlan makefile lockPath componentName out = do
   components <- readLockComponents lockPath
   graph <- moduleGraphFromMakefile makefile
   plans <- traverse (modulePlanFor components) graph
-  writeFile out (renderJson (planJson componentName plans) ++ "\n")
+  writeUtf8File out (renderJson (planJson componentName plans) ++ "\n")
 
 readLockComponents :: FilePath -> IO [LockComponent]
 readLockComponents lockPath = do
-  contents <- readFile lockPath
+  contents <- readUtf8File lockPath
   case Json.parseJson contents >>= decodeLockComponents of
-    Left err -> die ("failed to parse lock components from " ++ lockPath ++ ": " ++ err)
+    Left err -> throwJsonError ("failed to parse lock components from " ++ lockPath ++ ": " ++ err)
     Right components -> pure components
 
 decodeLockComponents :: Json -> Either String [LockComponent]
@@ -69,7 +74,7 @@ decodeLockComponent value = do
 
 modulePlanFor :: [LockComponent] -> ModuleDep -> IO ModulePlan
 modulePlanFor components dep = do
-  contents <- readFile (moduleSource dep)
+  contents <- readUtf8File (moduleSource dep)
   let componentExts =
         uniqueSorted
           [ ext
@@ -105,19 +110,53 @@ normalizeSourceDir dir =
 
 languagePragmas :: String -> [String]
 languagePragmas contents =
-  uniqueSorted (concatMap pragmasFromLine (lines contents))
+  uniqueSorted (concatMap languagePragma (pragmaBodies contents))
 
-pragmasFromLine :: String -> [String]
-pragmasFromLine line =
-  case stripPrefix "{-# LANGUAGE" (trim line) of
-    Nothing -> []
-    Just rest ->
-      let body = trim (dropSuffix "#-}" rest)
-       in filter (not . null) (map (trim . dropSuffix ",") (splitByComma body))
+languagePragma :: String -> [String]
+languagePragma body =
+  case words body of
+    keyword : _
+      | map toLower keyword == "language" ->
+          let extensions = trim (drop (length keyword) (trim body))
+           in filter (not . null) (map (trim . dropSuffix ",") (splitByComma extensions))
+    _ -> []
 
 hasAnnPragma :: String -> Bool
 hasAnnPragma contents =
-  any (isPrefixOf "{-# ANN" . trim) (lines contents)
+  any ((== "ann") . map toLower . firstWord) (pragmaBodies contents)
+
+pragmaBodies :: String -> [String]
+pragmaBodies = go
+  where
+    go source =
+      case findSubstring "{-#" source of
+        Nothing -> []
+        Just afterStart ->
+          case breakOn "#-}" afterStart of
+            Nothing -> []
+            Just (body, remaining) -> trim body : go remaining
+
+firstWord :: String -> String
+firstWord value =
+  case words value of
+    word : _ -> word
+    [] -> ""
+
+findSubstring :: String -> String -> Maybe String
+findSubstring needle = search
+  where
+    search [] = Nothing
+    search value@(_ : rest)
+      | needle `isPrefixOf` value = Just (drop (length needle) value)
+      | otherwise = search rest
+
+breakOn :: String -> String -> Maybe (String, String)
+breakOn needle = search []
+  where
+    search _ [] = Nothing
+    search prefix value@(ch : rest)
+      | needle `isPrefixOf` value = Just (reverse prefix, drop (length needle) value)
+      | otherwise = search (ch : prefix) rest
 
 planJson :: String -> [ModulePlan] -> Json
 planJson componentName plans =
@@ -139,9 +178,11 @@ moduleJson plan =
     ]
 
 needsDbFull :: ModulePlan -> Bool
-needsDbFull plan =
-  planAnnPragma plan
-    || any (`elem` thExtensions) (planExtensions plan)
+needsDbFull plan = needsDbFullFor (planExtensions plan) (planAnnPragma plan)
+
+needsDbFullFor :: [String] -> Bool -> Bool
+needsDbFullFor extensions annPragma =
+  annPragma || any (`elem` thExtensions) extensions
 
 thExtensions :: [String]
 thExtensions =
@@ -149,28 +190,6 @@ thExtensions =
   , "TemplateHaskell"
   , "TemplateHaskellQuotes"
   ]
-
-field :: String -> [(String, Json)] -> Either String Json
-field name fields =
-  case lookup name fields of
-    Just value -> Right value
-    Nothing -> Left ("missing required JSON field `" ++ name ++ "`")
-
-asObject :: String -> Json -> Either String [(String, Json)]
-asObject _ (JsonObject fields) = Right fields
-asObject context other = Left ("expected object for " ++ context ++ ", got " ++ show other)
-
-asArray :: String -> Json -> Either String [Json]
-asArray _ (JsonArray values) = Right values
-asArray context other = Left ("expected array for " ++ context ++ ", got " ++ show other)
-
-asString :: String -> Json -> Either String String
-asString _ (JsonString value) = Right value
-asString context other = Left ("expected string for " ++ context ++ ", got " ++ show other)
-
-stringArray :: String -> Json -> Either String [String]
-stringArray context value =
-  asArray context value >>= traverse (asString context)
 
 splitByComma :: String -> [String]
 splitByComma "" = [""]
@@ -182,15 +201,6 @@ splitByComma value =
 trim :: String -> String
 trim =
   dropWhileEnd isSpace . dropWhile isSpace
-
-dropWhileEnd :: (a -> Bool) -> [a] -> [a]
-dropWhileEnd predicate =
-  reverse . dropWhile predicate . reverse
-
-stripPrefix :: String -> String -> Maybe String
-stripPrefix prefix value
-  | prefix `isPrefixOf` value = Just (drop (length prefix) value)
-  | otherwise = Nothing
 
 dropPrefix :: String -> String -> String
 dropPrefix prefix value =

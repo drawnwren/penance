@@ -9,9 +9,9 @@ The remaining documents answer narrower questions:
 | Document | Purpose |
 |---|---|
 | [Architecture](ARCHITECTURE.md) | Current contract, target invariants, deficiencies, and migration plan |
-| [Penance architecture specification](NEW_ARCHITECTURE.MD) | Full intended architecture and design rationale |
+| [Penance architecture specification](NEW_ARCHITECTURE.md) | Full intended architecture and design rationale |
+| [Using `penanceProject`](USING_PENANCE_PROJECT.md) | Consumer API, inputs, outputs, and lock workflow |
 | [Module backend](MODULE_BACKEND.md) | Requirements and hard cases for module-granular builds |
 | [Backpack](BACKPACK.md) | Backpack model and fixtures |
 | [Architecture testing](ARCHITECTURE_TESTING.md) | Phase, gap, and rebuild test suites |
 | [Benchmarks](BENCHMARKS.md) | Benchmark commands and result formats |
-
