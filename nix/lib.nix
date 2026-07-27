@@ -383,14 +383,24 @@ let
     in
     if noSuffix == "" then "." else noSuffix;
 
+  componentForeignSourceFiles =
+    component:
+    (component.cSources or [ ]) ++ (component.includes or [ ]) ++ (component.installIncludes or [ ]);
+
+  componentForeignSourceDirs =
+    component: (component.includeDirs or [ ]) ++ (component.extraLibDirs or [ ]);
+
   componentSourceProjection =
     srcPath: pkg: component:
     let
       pkgRoot = if pkg.path == "." then srcPath else srcPath + "/${pkg.path}";
       rootString = toString pkgRoot;
       sourceDirs = map normalizeSourceDir (component.sourceDirs or [ "." ]);
+      foreignDirs = map normalizeSourceDir (componentForeignSourceDirs component);
+      foreignFiles = map normalizeSourceDir (componentForeignSourceFiles component);
       belongsToSourceDir =
         rel: dir: dir == "." || rel == dir || lib.hasPrefix "${dir}/" rel || lib.hasPrefix "${rel}/" dir;
+      belongsToSourceFile = rel: file: rel == file || lib.hasPrefix "${rel}/" file;
     in
     builtins.path {
       path = pkgRoot;
@@ -401,8 +411,54 @@ let
           pathString = toString path;
           rel = if pathString == rootString then "" else lib.removePrefix "${rootString}/" pathString;
         in
-        rel == "" || builtins.any (belongsToSourceDir rel) sourceDirs;
+        rel == ""
+        || builtins.any (belongsToSourceDir rel) (sourceDirs ++ foreignDirs)
+        || builtins.any (belongsToSourceFile rel) foreignFiles;
     };
+
+  componentHaskellForeignFlags =
+    component:
+    map (dir: "-I${dir}") (component.includeDirs or [ ])
+    ++ lib.concatMap (header: [
+      "-#include"
+      header
+    ]) (component.includes or [ ]);
+
+  componentCCompileFlags =
+    component:
+    [ "-optc-fPIC" ]
+    ++ map (dir: "-optc-I${dir}") (component.includeDirs or [ ])
+    ++ map (option: "-optc${option}") (component.ccOptions or [ ]);
+
+  resolveProjectedPath =
+    projectedSource: value:
+    if lib.hasPrefix "/" value then value else "${projectedSource}/${normalizeSourceDir value}";
+
+  componentResolvedIncludeDirs =
+    projectedSource: component:
+    map (resolveProjectedPath projectedSource) (component.includeDirs or [ ]);
+
+  componentResolvedExtraLibDirs =
+    projectedSource: component:
+    map (resolveProjectedPath projectedSource) (component.extraLibDirs or [ ]);
+
+  componentResolvedFrameworkDirs =
+    projectedSource: component:
+    map (resolveProjectedPath projectedSource) (component.extraFrameworkDirs or [ ]);
+
+  componentLinkFlags =
+    projectedSource: component:
+    map (dir: "-L${dir}") (componentResolvedExtraLibDirs projectedSource component)
+    ++ map (name: "-l${name}") (component.extraLibs or [ ])
+    ++ map (option: "-optl${option}") (component.ldOptions or [ ])
+    ++ lib.concatMap (dir: [
+      "-framework-path"
+      dir
+    ]) (componentResolvedFrameworkDirs projectedSource component)
+    ++ lib.concatMap (framework: [
+      "-framework"
+      framework
+    ]) (component.frameworks or [ ]);
 
   shellArrayLines =
     values:
@@ -440,10 +496,26 @@ let
       }
     );
 
+  isExternalLibraryUnit =
+    unit:
+    let
+      component = unit.component or null;
+    in
+    component == "lib" || (builtins.isString component && lib.hasPrefix "lib:" component);
+
   buildExternalSlice =
     hpkgs: contentAddressed: unit: package:
     let
       sliceName = "${sanitizeName unit.name}-${sanitizeName unit.version}-${unit.flagHash}";
+      component = unit.component or null;
+      registrationField =
+        if component == "lib" then
+          "name"
+        else if builtins.isString component && lib.hasPrefix "lib:" component then
+          "lib-name"
+        else
+          throw "penanceProject: external unit `${unit.unitId}` is not a library component";
+      registrationIdentity = if component == "lib" then unit.name else lib.removePrefix "lib:" component;
     in
     pkgs.runCommand "penance-external-${sliceName}"
       (
@@ -451,6 +523,7 @@ let
           nativeBuildInputs = [
             hpkgs.ghc
             pkgs.findutils
+            pkgs.gnused
           ];
         }
         // contentAddressedAttrs contentAddressed
@@ -459,13 +532,27 @@ let
         mkdir -p "$out/lib"
         ghc-pkg init "$out/lib/package.conf.d"
 
-        find ${package}/lib -path '*/package.conf.d/*.conf' -type f -print | sort > "$TMPDIR/confs"
+        find ${package}/lib -path '*/package.conf.d/*.conf' -type f -print \
+          | while IFS= read -r candidate; do
+              candidate_identity="$(
+                sed -n 's/^${registrationField}:[[:space:]]*//p' "$candidate" \
+                  | head -n 1
+              )"
+              if test "$candidate_identity" = ${lib.escapeShellArg registrationIdentity}; then
+                printf '%s\n' "$candidate"
+              fi
+            done \
+          | sort \
+          > "$TMPDIR/confs"
         test "$(wc -l < "$TMPDIR/confs" | tr -d ' ')" = 1
         conf="$(cat "$TMPDIR/confs")"
         ghc-pkg --force --package-db "$out/lib/package.conf.d" register "$conf"
         ghc-pkg --package-db "$out/lib/package.conf.d" recache
+
+        registration_name="$(sed -n 's/^name:[[:space:]]*//p' "$conf" | head -n 1)"
+        test -n "$registration_name"
         ghc-pkg --package-db "$out/lib/package.conf.d" \
-          field ${lib.escapeShellArg unit.name} id --simple-output > "$out/installed-id"
+          field "$registration_name" id --simple-output > "$out/installed-id"
         test "$(wc -w < "$out/installed-id" | tr -d ' ')" = 1
 
         printf '%s\n' ${
@@ -504,7 +591,10 @@ let
               packageDefinition = if packageSet == null then { } else packageSet.${unit.name} or { };
               dependencyIds = (unit.depends or [ ]) ++ (unit.exeDepends or [ ]);
               dependencyUnits = map (dependencyId: unitsById.${dependencyId}) dependencyIds;
-              dependencyNames = map (dependency: dependency.name) dependencyUnits;
+              # cabal2nix functions consume package-named arguments, while the
+              # lock may contain several component-qualified units with that
+              # name. listToAttrs provides the deterministic package argument;
+              # unit identity remains intact in the lock graph and slices.
               namedDependencies = builtins.listToAttrs (
                 map (dependency: {
                   inherit (dependency) name;
@@ -518,9 +608,6 @@ let
               };
               packageSource = packageDefinition.src or lockedSdist;
               expressionPackage =
-                assert lib.assertMsg (
-                  builtins.length dependencyNames == builtins.length (lib.unique dependencyNames)
-                ) "penanceProject: unit `${unitId}` has ambiguous direct dependencies with the same package name";
                 if expression != null && builtins.pathExists expression then
                   lib.callPackageWith (pkgs // hpkgs // namedDependencies) expression { }
                 else
@@ -563,8 +650,26 @@ let
       );
       slices = builtins.mapAttrs (
         unitId: unit:
-        if unit.source == "hackage" then
-          buildExternalSlice hpkgs contentAddressed unit packages.${unitId}
+        if unit.source == "hackage" && isExternalLibraryUnit unit then
+          let
+            # Nixpkgs builds all libraries from a package together, so a main
+            # library and its internal sublibraries must be sliced from the
+            # same package derivation or their installed unit IDs will not
+            # agree. Prefer the main library whose unit closure owns this
+            # component; packages without a main library fall back to the
+            # component's own derivation.
+            owner = lib.findFirst (
+              candidate:
+              candidate.source == "hackage"
+              && candidate.component == "lib"
+              && candidate.name == unit.name
+              && candidate.version == unit.version
+              && candidate.flagHash == unit.flagHash
+              && builtins.elem unitId closureIdsById.${candidate.unitId}
+            ) null (builtins.attrValues unitsById);
+            packageUnitId = if owner == null then unitId else owner.unitId;
+          in
+          buildExternalSlice hpkgs contentAddressed unit packages.${packageUnitId}
         else
           null
       ) unitsById;
@@ -776,14 +881,22 @@ let
         unitId: externalContext.unitsById.${unitId}.source == "ghc-boot"
       ) directExternalIds;
       directHackageUnitIds = builtins.filter (
-        unitId: externalContext.unitsById.${unitId}.source == "hackage"
+        unitId:
+        let
+          unit = externalContext.unitsById.${unitId};
+        in
+        unit.source == "hackage" && isExternalLibraryUnit unit
       ) directExternalIds;
       directBootPackageNames = map (unitId: externalContext.unitsById.${unitId}.name) directBootUnitIds;
       closureIds = lib.unique (
         lib.concatMap (unitId: externalContext.closureIdsById.${unitId}) directExternalIds
       );
       closureHackageUnitIds = builtins.filter (
-        unitId: externalContext.unitsById.${unitId}.source == "hackage"
+        unitId:
+        let
+          unit = externalContext.unitsById.${unitId};
+        in
+        unit.source == "hackage" && isExternalLibraryUnit unit
       ) closureIds;
       localNames = builtins.filter (
         name: name != pkg.name && builtins.hasAttr name packageBuilds
@@ -854,6 +967,12 @@ let
       composePackageDb
       componentExtensionFlags
       componentNeedsFullDb
+      componentHaskellForeignFlags
+      componentCCompileFlags
+      componentLinkFlags
+      componentResolvedIncludeDirs
+      componentResolvedExtraLibDirs
+      componentResolvedFrameworkDirs
       sanitizeName
       ;
   };
@@ -891,6 +1010,7 @@ let
       compileFlags =
         compileFlagValues.flags
         ++ componentExtensionFlags component
+        ++ componentHaskellForeignFlags component
         ++ stdDevGhcOptions
         ++ ghcOptions
         ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ "-dynamic-too" ];
@@ -906,9 +1026,12 @@ let
       };
       linkFlags =
         linkFlagValues.flags
+        ++ componentLinkFlags projectedSource component
         ++ stdDevGhcOptions
         ++ ghcOptions
         ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ "-dynamic" ];
+      cSources = component.cSources or [ ];
+      cCompileFlags = componentCCompileFlags component;
       objectSuffix = if pkgs.stdenv.hostPlatform.isDarwin then "*.dyn_o" else "*.o";
       directPackageIdShell =
         values:
@@ -944,7 +1067,7 @@ let
             // contentAddressedAttrs contentAddressed
           )
           ''
-                    mkdir -p "$out/build" build
+                    mkdir -p "$out/build" build foreign-build
                     cp -R ${projectedSource} source
                     chmod -R u+w source
                     cd source
@@ -988,7 +1111,29 @@ let
                       mkdir -p "$out/build/$(dirname "$artifact")"
                       cp "$artifact" "$out/build/$artifact"
                     done)
-                    find "$out/build" -name ${lib.escapeShellArg objectSuffix} -type f | sort > "$out/objects"
+
+                    c_flags=(
+            ${shellArrayLines cCompileFlags}
+                    )
+                    c_source_index=0
+                    while IFS= read -r c_source; do
+                      test -n "$c_source" || continue
+                      test -f "$c_source"
+                      ghc -c "''${c_flags[@]}" "$c_source" \
+                        -o "../foreign-build/c-source-$c_source_index.o"
+                      c_source_index=$((c_source_index + 1))
+                    done <<'C_SOURCES'
+            ${heredocLines cSources}
+            C_SOURCES
+                    if [ "$c_source_index" -gt 0 ]; then
+                      mkdir -p "$out/build/foreign"
+                      cp ../foreign-build/*.o "$out/build/foreign/"
+                    fi
+
+                    {
+                      find "$out/build" -name ${lib.escapeShellArg objectSuffix} -type f
+                      find "$out/build/foreign" -name '*.o' -type f 2>/dev/null || true
+                    } | sort -u > "$out/objects"
                     test -s "$out/objects"
 
                     printf '%s\n' ${

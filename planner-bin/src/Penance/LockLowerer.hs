@@ -38,6 +38,16 @@ data LoweredComponent = LoweredComponent
   , loweredComponentExternalExeDepends :: [String]
   , loweredComponentDefaultExtensions :: [String]
   , loweredComponentNeedsFullDb :: Bool
+  , loweredComponentCSources :: Maybe [String]
+  , loweredComponentIncludeDirs :: Maybe [String]
+  , loweredComponentIncludes :: Maybe [String]
+  , loweredComponentInstallIncludes :: Maybe [String]
+  , loweredComponentCcOptions :: Maybe [String]
+  , loweredComponentLdOptions :: Maybe [String]
+  , loweredComponentExtraLibs :: Maybe [String]
+  , loweredComponentExtraLibDirs :: Maybe [String]
+  , loweredComponentFrameworks :: Maybe [String]
+  , loweredComponentExtraFrameworkDirs :: Maybe [String]
   }
 
 data LoweredExternal = LoweredExternal
@@ -112,6 +122,16 @@ decodeComponent value = do
     <*> stringList "externalExeDepends" fields
     <*> stringList "defaultExtensions" fields
     <*> requiredBool "needsFullDb" fields
+    <*> optionalStringList "cSources" fields
+    <*> optionalStringList "includeDirs" fields
+    <*> optionalStringList "includes" fields
+    <*> optionalStringList "installIncludes" fields
+    <*> optionalStringList "ccOptions" fields
+    <*> optionalStringList "ldOptions" fields
+    <*> optionalStringList "extraLibs" fields
+    <*> optionalStringList "extraLibDirs" fields
+    <*> optionalStringList "frameworks" fields
+    <*> optionalStringList "extraFrameworkDirs" fields
 
 decodeExternal :: Json -> Either String LoweredExternal
 decodeExternal value = do
@@ -183,6 +203,15 @@ stringList name fields = do
     decode (JsonString value) = Right value
     decode other = Left (name ++ " must contain strings, got " ++ show other)
 
+optionalStringList :: String -> [(String, Json)] -> Either String (Maybe [String])
+optionalStringList name fields =
+  case lookup name fields of
+    Nothing -> Right Nothing
+    Just value -> Just <$> (asArray name value >>= traverse decode)
+  where
+    decode (JsonString value) = Right value
+    decode other = Left (name ++ " must contain strings, got " ++ show other)
+
 encodePackage :: LoweredPackage -> Json
 encodePackage package =
   Json.object
@@ -197,19 +226,33 @@ encodePackage package =
 encodeComponent :: LoweredComponent -> Json
 encodeComponent component =
   Json.object
-    [ ("name", Json.string (loweredComponentName component))
-    , ("unitId", Json.string (loweredComponentUnitId component))
-    , ("kind", Json.string (loweredComponentKind component))
-    , ("sourceDirs", Json.stringArray (loweredComponentSourceDirs component))
-    , ("modules", Json.stringArray (loweredComponentModules component))
-    , ("main", loweredComponentMain component)
-    , ("signatures", Json.stringArray (loweredComponentSignatures component))
-    , ("dependencies", Json.stringArray (loweredComponentDependencies component))
-    , ("externalDepends", Json.stringArray (loweredComponentExternalDepends component))
-    , ("externalExeDepends", Json.stringArray (loweredComponentExternalExeDepends component))
-    , ("defaultExtensions", Json.stringArray (loweredComponentDefaultExtensions component))
-    , ("needsFullDb", Json.bool (loweredComponentNeedsFullDb component))
-    ]
+    ( [ ("name", Json.string (loweredComponentName component))
+      , ("unitId", Json.string (loweredComponentUnitId component))
+      , ("kind", Json.string (loweredComponentKind component))
+      , ("sourceDirs", Json.stringArray (loweredComponentSourceDirs component))
+      , ("modules", Json.stringArray (loweredComponentModules component))
+      , ("main", loweredComponentMain component)
+      , ("signatures", Json.stringArray (loweredComponentSignatures component))
+      , ("dependencies", Json.stringArray (loweredComponentDependencies component))
+      , ("externalDepends", Json.stringArray (loweredComponentExternalDepends component))
+      , ("externalExeDepends", Json.stringArray (loweredComponentExternalExeDepends component))
+      , ("defaultExtensions", Json.stringArray (loweredComponentDefaultExtensions component))
+      , ("needsFullDb", Json.bool (loweredComponentNeedsFullDb component))
+      ]
+        ++ encodeOptionalStringList "cSources" (loweredComponentCSources component)
+        ++ encodeOptionalStringList "includeDirs" (loweredComponentIncludeDirs component)
+        ++ encodeOptionalStringList "includes" (loweredComponentIncludes component)
+        ++ encodeOptionalStringList "installIncludes" (loweredComponentInstallIncludes component)
+        ++ encodeOptionalStringList "ccOptions" (loweredComponentCcOptions component)
+        ++ encodeOptionalStringList "ldOptions" (loweredComponentLdOptions component)
+        ++ encodeOptionalStringList "extraLibs" (loweredComponentExtraLibs component)
+        ++ encodeOptionalStringList "extraLibDirs" (loweredComponentExtraLibDirs component)
+        ++ encodeOptionalStringList "frameworks" (loweredComponentFrameworks component)
+        ++ encodeOptionalStringList "extraFrameworkDirs" (loweredComponentExtraFrameworkDirs component)
+    )
+
+encodeOptionalStringList :: String -> Maybe [String] -> [(String, Json)]
+encodeOptionalStringList name = maybe [] (\values -> [(name, Json.stringArray values)])
 
 encodeExternal :: LoweredExternal -> Json
 encodeExternal external =

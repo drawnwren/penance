@@ -1,5 +1,6 @@
 {
   benchSrc,
+  cSourcesSrc,
   hpkgs,
   lockExternalSrc,
   pkgs,
@@ -43,7 +44,6 @@ let
         repent \
           --project ${benchSrc} \
           --compiler ghc-9.10.2 \
-          --ghc-pkg ${hpkgs.ghc}/bin/ghc-pkg \
           --index-state 2026-02-01T00:00:00Z \
           --check ${benchSrc}/penance.lock \
           --out "$out/penance.lock"
@@ -64,11 +64,33 @@ let
         cmp "$out/lock-external-1.lock" ${lockExternalSrc}/penance.lock
         cp "$out/lock-external-1.lock" "$out/lock-external.penance.lock"
 
+        repent \
+          --project ${cSourcesSrc} \
+          --compiler ghc-9.10.2 \
+          --ghc-pkg ${hpkgs.ghc}/bin/ghc-pkg \
+          --index-state 2026-04-01T00:00:00Z \
+          --check ${cSourcesSrc}/penance.lock \
+          --out "$out/c-sources.penance.lock"
+
         jq -e '
           .schema == "penance/lock/2"
           and any(.externalUnits[]; .name == "StateVar" and .version == "1.2.2" and .source == "hackage" and (.sdist.sha256 | length > 0))
           and any(.externalUnits[]; .name == "base" and .source == "ghc-boot")
         ' "$out/lock-external.penance.lock" >/dev/null
+        jq -e '
+          any(
+            .packages[].components[];
+            .name == "lib"
+            and .cSources == ["cbits/foreign_answer.c"]
+            and .includeDirs == ["cbits/include"]
+            and .installIncludes == ["foreign_answer.h"]
+            and .ccOptions == [
+              "-DPENANCE_C_BIAS=0",
+              "-UPENANCE_C_BIAS",
+              "-DPENANCE_C_BIAS=1"
+            ]
+          )
+        ' "$out/c-sources.penance.lock" >/dev/null
 
         scratch="$(mktemp -d "$TMPDIR/lock-external-stale.XXXXXX")"
         trap 'rm -rf "$scratch"' EXIT

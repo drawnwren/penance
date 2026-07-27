@@ -4,6 +4,7 @@ module Penance.Repent.Project
   , LockComponent (..)
   , readProjectPackages
   , readProjectIndexState
+  , readProjectConstraints
   , matchGlob
   )
 where
@@ -108,6 +109,12 @@ readProjectIndexState projectRoot = do
             ++ path
             ++ " or set PENANCE_INDEX_STATE"
         )
+
+readProjectConstraints :: FilePath -> IO [String]
+readProjectConstraints projectRoot = do
+  contents <- readUtf8File (projectRoot </> "cabal.project")
+  project <- either (throwCabalParseError . ("repent: " ++)) pure (parseCabalProject contents)
+  pure (projectConstraints project)
 
 defaultPackages :: CabalProject -> [FilePath]
 defaultPackages project =

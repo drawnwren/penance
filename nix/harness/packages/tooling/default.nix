@@ -1,6 +1,7 @@
 {
   benchHpkgs,
   benchSrc,
+  cSourcesSrc,
   ghcWasm,
   hpkgs,
   lockExternalSrc,
@@ -60,6 +61,7 @@ let
     runtimeInputs = [
       pkgs.cabal-install
       pkgs.cabal2nix
+      hpkgs.ghc
       pkgs.nix
     ];
     text = ''
@@ -356,6 +358,7 @@ let
       equal = builtins.deepSeq wasm (builtins.deepSeq expected (wasm == expected));
     };
   lowererFixtures = [
+    (lowererFixture "c-sources" (cSourcesSrc + "/penance.lock"))
     (lowererFixture "simple-lib" (simpleLibSrc + "/penance.lock"))
     (lowererFixture "lock-external" (lockExternalSrc + "/penance.lock"))
     (lowererFixture "penance-bench" (benchSrc + "/penance.lock"))
@@ -363,6 +366,7 @@ let
     (lowererFixture "multi-instance-external" (multiInstanceExternalSrc + "/penance.lock"))
   ];
   lowererWasmFixtures = [
+    (lowererWasmFixture "c-sources" (cSourcesSrc + "/penance.lock"))
     (lowererWasmFixture "simple-lib" (simpleLibSrc + "/penance.lock"))
     (lowererWasmFixture "lock-external" (lockExternalSrc + "/penance.lock"))
     (lowererWasmFixture "penance-bench" (benchSrc + "/penance.lock"))
@@ -378,6 +382,7 @@ let
       builtins.toJSON {
         schema = "penance/lowerer-equality/1";
         fixtures = [
+          "c-sources"
           "simple-lib"
           "lock-external"
           "penance-bench"
@@ -394,6 +399,7 @@ let
       builtins.toJSON {
         schema = "penance/lowerer-wasm-provenance/1";
         fixtures = [
+          "c-sources"
           "simple-lib"
           "lock-external"
           "penance-bench"
@@ -415,6 +421,21 @@ let
   stateVarB = stateVarTemplate // {
     unitId = "StateVar-1.2.2-cache-b";
     flagHash = "bbbbbbbbbbbb";
+  };
+  componentQualifiedStateVarFrontend = stateVarTemplate // {
+    unitId = "StateVar-1.2.2-component-frontend";
+    component = "lib:frontend";
+  };
+  componentQualifiedStateVarBackend = stateVarTemplate // {
+    unitId = "StateVar-1.2.2-component-backend";
+    component = "lib:backend";
+  };
+  componentQualifiedStateVarMain = stateVarTemplate // {
+    unitId = "StateVar-1.2.2-component-main";
+    depends = stateVarTemplate.depends ++ [
+      componentQualifiedStateVarFrontend.unitId
+      componentQualifiedStateVarBackend.unitId
+    ];
   };
   cacheIsolationComponent = builtins.head (builtins.head simpleLibRaw.packages).components;
   cacheIsolationLock = simpleLibRaw // {
@@ -495,6 +516,53 @@ let
     ) cacheIsolationLock.packages;
   };
   danglingLowerResult = builtins.tryEval (builtins.deepSeq (penanceLib.lowerLock danglingLock) true);
+  componentQualifiedDependencyLock = simpleLibRaw // {
+    inherit (lockExternalRaw) compiler indexState;
+    externalUnits = builtins.filter (unit: unit.source != "hackage") lockExternalRaw.externalUnits ++ [
+      componentQualifiedStateVarFrontend
+      componentQualifiedStateVarBackend
+      componentQualifiedStateVarMain
+    ];
+    packages = [
+      (
+        (builtins.head simpleLibRaw.packages)
+        // {
+          components = map (
+            component:
+            component
+            // {
+              externalDepends =
+                if component.name == "lib" then
+                  [
+                    "base-4.20.1.0-79d1"
+                    componentQualifiedStateVarMain.unitId
+                  ]
+                else
+                  component.externalDepends;
+            }
+          ) (builtins.head simpleLibRaw.packages).components;
+        }
+      )
+    ];
+  };
+  componentQualifiedDependencyProject = penanceLib.penanceProject {
+    src = simpleLibSrc;
+    hackageNix = ../../../penance-hackage;
+    mode = "component";
+    lockOverride = componentQualifiedDependencyLock;
+  };
+  componentQualifiedDependencyEvaluation =
+    builtins.tryEval
+      componentQualifiedDependencyProject.packages.simple-lib.externalPackages.${componentQualifiedStateVarMain.unitId}.drvPath;
+  penanceComponentQualifiedDependencies =
+    assert componentQualifiedDependencyEvaluation.success;
+    pkgs.writeText "penance-component-qualified-dependencies.json" (
+      builtins.toJSON {
+        schema = "penance/component-qualified-dependencies/1";
+        duplicatePackageNames = "accepted";
+        unitCount = 3;
+      }
+    );
   penanceUnitCacheIsolation =
     assert componentDrvPath cacheBaseline "lib" == componentDrvPath cacheMutateB "lib";
     assert
@@ -530,6 +598,7 @@ in
     lowererWasmFixtures
     penanceLowererEquality
     penanceLowererWasmProvenance
+    penanceComponentQualifiedDependencies
     penanceUnitCacheIsolation
     ;
 }

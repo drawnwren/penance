@@ -14,7 +14,11 @@ import Penance.CabalPlan
   , renderFlagAssignment
   , renderUnitId
   )
-import Penance.CabalProject (CabalProject (..), parseCabalProject)
+import Penance.CabalProject
+  ( CabalProject (..)
+  , parseCabalProject
+  , qualifyConstraintForAllScopes
+  )
 import Penance.Dyndrv
   ( DerivationSpec (..)
   , DrvPath
@@ -201,19 +205,34 @@ pragmaTests =
 
 cabalProjectTests :: TestTree
 cabalProjectTests =
-  testCase "shared project parser retains globs, optional packages, and index state" $
+  testCase "shared project parser retains packages, index state, and solver constraints" $
     case parseCabalProject projectText of
       Left err -> assertFailure err
       Right project -> do
         projectPackages project @?= ["packages/*/*.cabal"]
         projectOptionalPackages project @?= ["tools/*"]
         projectIndexState project @?= Just "2026-02-01T00:00:00Z"
+        projectConstraints project
+          @?= [ "happy < 2"
+              , "hashable == {1.4.7.0, 1.5.0.0}"
+              , "text >= 2.1 && < 2.2"
+              ]
+        map qualifyConstraintForAllScopes (projectConstraints project)
+          @?= [ "any.happy < 2"
+              , "any.hashable == {1.4.7.0, 1.5.0.0}"
+              , "any.text >= 2.1 && < 2.2"
+              ]
+        qualifyConstraintForAllScopes "setup.happy < 2" @?= "setup.happy < 2"
   where
     projectText =
       unlines
         [ "packages: packages/*/*.cabal"
         , "optional-packages: tools/*"
         , "index-state: 2026-02-01T00:00:00Z"
+        , "constraints:"
+        , "  text >= 2.1 && < 2.2,"
+        , "  happy < 2,"
+        , "  hashable == {1.4.7.0, 1.5.0.0}"
         ]
 
 repentProjectTests :: TestTree
@@ -453,7 +472,7 @@ packageSetTests =
         packageSet <- readPackageSetFixture
         packageSetHash packageSet
           @?= "sha256:aea907fe68b908e246ce8fc47987a1bb72ccfafe2a186b90d2fdb8a346bc41c6"
-        packageSetConstraints packageSet @?= ["StateVar==1.2.2"]
+        packageSetConstraints packageSet @?= ["any.StateVar==1.2.2"]
         assertBool "generated package set is not Nix" ("\"StateVar\" =" `isInfixOf` packageSetNix packageSet)
     , testCase "rejects a recipe whose flag hash does not match its flags" $ do
         case decodePackageSet (replaceAll "6e46dd10defc" "000000000000" packageSetEvaluation) of
@@ -463,7 +482,8 @@ packageSetTests =
         packageSet <- readPackageSetFixture
         plan <- readPlanFixture
         extended <- either assertFailure pure (extendPackageSetWithPlan packageSet plan)
-        packageSetConstraints extended @?= ["StateVar==1.2.2", "hsc2hs==0.68.10"]
+        packageSetConstraints extended
+          @?= ["any.StateVar==1.2.2", "any.hsc2hs==0.68.10"]
     ]
 
 readPackageSetFixture :: IO PackageSet

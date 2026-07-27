@@ -97,8 +97,24 @@ componentJson plan packageName component = do
     , ("defaultExtensions", Json.stringArray (sort (map prettyShow (defaultExtensions buildInfo'))))
     , ("needsFullDb", Json.bool (lockComponentNeedsFullDb component))
     ]
+      ++ optionalStringArray "cSources" (cSources buildInfo')
+      ++ optionalStringArray "includeDirs" (includeDirs buildInfo')
+      ++ optionalStringArray "includes" (includes buildInfo')
+      ++ optionalStringArray "installIncludes" (installIncludes buildInfo')
+      ++ optionalStringArray "ccOptions" (ccOptions buildInfo')
+      ++ optionalStringArray "ldOptions" (ldOptions buildInfo')
+      ++ optionalStringArray "extraLibs" (extraLibs buildInfo')
+      ++ optionalStringArray "extraLibDirs" (extraLibDirs buildInfo')
+      ++ optionalStringArray "frameworks" (frameworks buildInfo')
+      ++ optionalStringArray "extraFrameworkDirs" (extraFrameworkDirs buildInfo')
   where
     buildInfo' = lockComponentBuildInfo component
+
+optionalStringArray :: String -> [String] -> [(String, Json)]
+optionalStringArray name values =
+  if null values
+    then []
+    else [(name, Json.stringArray values)]
 
 localComponentPlan :: ResolvedPlan -> String -> String -> Either String LocalComponentUnit
 localComponentPlan plan packageName componentName =

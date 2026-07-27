@@ -23,6 +23,21 @@ forAllSystems (
             assert previous.src == stateVarOverrideSource;
             previous.overrideAttrs (old: {
               postInstall = (old.postInstall or "") + ''
+                conf_dir="$(find "$out/lib" -type d -name package.conf.d | head -n 1)"
+                test -n "$conf_dir"
+                cat > "$conf_dir/penance-regression-internal.conf" <<'EOF'
+                name: z-StateVar-z-penance-regression-internal
+                lib-name: penance-regression-internal
+                version: 1.2.2
+                id: z-StateVar-z-penance-regression-internal-1.2.2
+                key: z-StateVar-z-penance-regression-internal-1.2.2
+                exposed: False
+                exposed-modules:
+                import-dirs:
+                library-dirs:
+                hs-libraries:
+                depends:
+                EOF
                 touch "$out/penance-package-set-override"
               '';
             });
@@ -32,8 +47,27 @@ forAllSystems (
     sharedPackageSetRawLock = builtins.fromJSON (
       builtins.readFile ../../tests/fixtures/lock-external/penance.lock
     );
+    sharedStateVarUnit = pkgs.lib.findFirst (
+      unit: unit.source == "hackage" && unit.name == "StateVar"
+    ) (throw "shared package-set fixture needs StateVar") sharedPackageSetRawLock.externalUnits;
+    sharedStateVarInternalUnit = sharedStateVarUnit // {
+      unitId = "StateVar-1.2.2-penance-regression-internal";
+      component = "lib:penance-regression-internal";
+    };
     sharedPackageSetLock = sharedPackageSetRawLock // {
       packageSetHash = sharedPackageSet.__penance.hash;
+      externalUnits =
+        map (
+          unit:
+          if unit.unitId == sharedStateVarUnit.unitId then
+            unit
+            // {
+              depends = unit.depends ++ [ sharedStateVarInternalUnit.unitId ];
+            }
+          else
+            unit
+        ) sharedPackageSetRawLock.externalUnits
+        ++ [ sharedStateVarInternalUnit ];
     };
     sharedPackageSetProject = self.lib.${system}.penanceProject {
       src = ../../tests/fixtures;
@@ -69,6 +103,10 @@ forAllSystems (
       )).unitId;
     overriddenExternalPackage =
       sharedPackageSetProject.packages.lock-external.externalPackages.${sharedPackageSetUnitId};
+    overriddenExternalSlice =
+      sharedPackageSetProject.packages.lock-external.externalUnits.${sharedPackageSetUnitId};
+    overriddenExternalInternalSlice =
+      sharedPackageSetProject.packages.lock-external.externalUnits.${sharedStateVarInternalUnit.unitId};
   in
   {
     ghc-wasm-planner = self.packages.${system}.plannerNormalizerNative;
@@ -86,6 +124,7 @@ forAllSystems (
           touch "$out"
         '';
     repent-lock-proof = self.packages.${system}.repentBench;
+    c-sources = self.packages.${system}.penanceCSources;
     shared-package-set =
       assert !corruptedSharedPackageSetEvaluation.success;
       assert
@@ -96,6 +135,11 @@ forAllSystems (
           sharedPackageSetProject.packages.lock-external.components."exe:lock-external"
         }/bin/lock-external
         test -f ${overriddenExternalPackage}/penance-package-set-override
+        test "$(find ${overriddenExternalPackage}/lib -path '*/package.conf.d/*.conf' -type f | wc -l | tr -d ' ')" = 2
+        test "$(find ${overriddenExternalSlice}/lib/package.conf.d -name '*.conf' -type f | wc -l | tr -d ' ')" = 1
+        grep -R '^name:[[:space:]]*StateVar$' ${overriddenExternalSlice}/lib/package.conf.d
+        test "$(find ${overriddenExternalInternalSlice}/lib/package.conf.d -name '*.conf' -type f | wc -l | tr -d ' ')" = 1
+        grep -R '^lib-name:[[:space:]]*penance-regression-internal$' ${overriddenExternalInternalSlice}/lib/package.conf.d
         test ${pkgs.lib.escapeShellArg sharedPackageSetProject.packageSetHash} = ${pkgs.lib.escapeShellArg sharedPackageSet.__penance.hash}
         touch "$out"
       '';
@@ -150,6 +194,7 @@ forAllSystems (
           touch "$out"
         '';
     lowerer-wasm-provenance = self.packages.${system}.penanceLowererWasmProvenance;
+    component-qualified-dependencies = self.packages.${system}.penanceComponentQualifiedDependencies;
     unit-cache-isolation = self.packages.${system}.penanceUnitCacheIsolation;
     multi-instance-external = self.packages.${system}.penanceMultiInstanceExternal;
     local-th-dependency = self.packages.${system}.penanceLocalThDependency;

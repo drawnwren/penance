@@ -9,22 +9,36 @@ assert lib.assertMsg (
 let
   sortBy = field: builtins.sort (left: right: left.${field} < right.${field});
 
-  lowerComponent = component: {
-    inherit (component)
-      name
-      unitId
-      kind
-      needsFullDb
-      ;
-    sourceDirs = component.sourceDirs or [ ];
-    modules = component.modules or [ ];
-    main = component.main or null;
-    signatures = component.signatures or [ ];
-    dependencies = component.dependencies or [ ];
-    externalDepends = component.externalDepends or [ ];
-    externalExeDepends = component.externalExeDepends or [ ];
-    defaultExtensions = component.defaultExtensions or [ ];
-  };
+  lowerComponent =
+    component:
+    {
+      inherit (component)
+        name
+        unitId
+        kind
+        needsFullDb
+        ;
+      sourceDirs = component.sourceDirs or [ ];
+      modules = component.modules or [ ];
+      main = component.main or null;
+      signatures = component.signatures or [ ];
+      dependencies = component.dependencies or [ ];
+      externalDepends = component.externalDepends or [ ];
+      externalExeDepends = component.externalExeDepends or [ ];
+      defaultExtensions = component.defaultExtensions or [ ];
+    }
+    // lib.optionalAttrs (component ? cSources) { inherit (component) cSources; }
+    // lib.optionalAttrs (component ? includeDirs) { inherit (component) includeDirs; }
+    // lib.optionalAttrs (component ? includes) { inherit (component) includes; }
+    // lib.optionalAttrs (component ? installIncludes) { inherit (component) installIncludes; }
+    // lib.optionalAttrs (component ? ccOptions) { inherit (component) ccOptions; }
+    // lib.optionalAttrs (component ? ldOptions) { inherit (component) ldOptions; }
+    // lib.optionalAttrs (component ? extraLibs) { inherit (component) extraLibs; }
+    // lib.optionalAttrs (component ? extraLibDirs) { inherit (component) extraLibDirs; }
+    // lib.optionalAttrs (component ? frameworks) { inherit (component) frameworks; }
+    // lib.optionalAttrs (component ? extraFrameworkDirs) {
+      inherit (component) extraFrameworkDirs;
+    };
 
   lowerPackage = package: {
     inherit (package)

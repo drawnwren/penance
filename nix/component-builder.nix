@@ -12,6 +12,12 @@
   composePackageDb,
   componentExtensionFlags,
   componentNeedsFullDb,
+  componentHaskellForeignFlags,
+  componentCCompileFlags,
+  componentLinkFlags,
+  componentResolvedIncludeDirs,
+  componentResolvedExtraLibDirs,
+  componentResolvedFrameworkDirs,
   sanitizeName,
 }:
 
@@ -44,7 +50,14 @@ let
       ;
     localDbAttr = compileLocalDbAttr;
   };
-  flags = flagValues.flags ++ componentExtensionFlags component ++ stdDevGhcOptions ++ ghcOptions;
+  flags =
+    flagValues.flags
+    ++ componentExtensionFlags component
+    ++ componentHaskellForeignFlags component
+    ++ stdDevGhcOptions
+    ++ ghcOptions;
+  cSources = component.cSources or [ ];
+  cCompileFlags = componentCCompileFlags component;
   hackageConfDirs = map (
     externalUnitId: "${externalContext.slices.${externalUnitId}}/lib/package.conf.d"
   ) flagValues.closureHackageUnitIds;
@@ -63,6 +76,10 @@ let
     confDir
   ]) dependencyConfDirs;
   projectedSource = componentSourceProjection srcPath pkg component;
+  nativeLinkFlags = componentLinkFlags projectedSource component;
+  resolvedIncludeDirs = componentResolvedIncludeDirs projectedSource component;
+  resolvedExtraLibDirs = componentResolvedExtraLibDirs projectedSource component;
+  resolvedFrameworkDirs = componentResolvedFrameworkDirs projectedSource component;
   hackageDependsShell = lib.concatMapStringsSep "\n" (externalUnitId: ''
     dependency_id="$(cat ${externalContext.slices.${externalUnitId}}/installed-id)"
     test -n "$dependency_id"
@@ -101,7 +118,7 @@ let
         }
       )
       ''
-                mkdir -p "$out/lib" "$iface/lib/ghc/${unitId}" build
+                mkdir -p "$out/lib" "$iface/lib/ghc/${unitId}" build foreign-build
                 cp -R ${projectedSource} source
                 chmod -R u+w source
                 cd source
@@ -162,6 +179,20 @@ let
 
                 ghc --make -no-link "''${common_flags[@]}" "''${module_sources[@]}"
 
+                c_flags=(
+        ${shellArrayLines cCompileFlags}
+                )
+                c_source_index=0
+                while IFS= read -r c_source; do
+                  test -n "$c_source" || continue
+                  test -f "$c_source"
+                  ghc -c "''${c_flags[@]}" "$c_source" \
+                    -o "../foreign-build/c-source-$c_source_index.o"
+                  c_source_index=$((c_source_index + 1))
+                done <<'C_SOURCES'
+        ${heredocLines cSources}
+        C_SOURCES
+
                 compiler_version="$(ghc --numeric-version)"
                 iface_version="$(printf '%s' "$compiler_version" | tr -d .)"
                 case "$iface_version" in
@@ -184,6 +215,10 @@ let
                   test -n "$object" || continue
                   object_args+=("$object")
                 done < "$TMPDIR/objects"
+                while IFS= read -r object; do
+                  test -n "$object" || continue
+                  object_args+=("$object")
+                done < <(find ../foreign-build -name '*.o' -type f | sort)
                 ${pkgs.stdenv.cc.bintools.bintools}/bin/ar rcs "$out/lib/libHS${unitId}.a" "''${object_args[@]}"
 
                 find ../build -name '*.dyn_o' -type f | sort > "$TMPDIR/dynamic-objects"
@@ -192,13 +227,20 @@ let
                   test -n "$object" || continue
                   dynamic_object_args+=("$object")
                 done < "$TMPDIR/dynamic-objects"
+                while IFS= read -r object; do
+                  test -n "$object" || continue
+                  dynamic_object_args+=("$object")
+                done < <(find ../foreign-build -name '*.o' -type f | sort)
                 test "''${#dynamic_object_args[@]}" -gt 0
                 case "$(uname -s)" in
                   Darwin) shared_suffix=dylib ;;
                   Linux) shared_suffix=so ;;
                   *) echo "penanceProject: unsupported shared-library platform $(uname -s)" >&2; exit 1 ;;
                 esac
-                ghc "''${common_flags[@]}" -shared -dynamic "''${dynamic_object_args[@]}" \
+                native_link_flags=(
+        ${shellArrayLines nativeLinkFlags}
+                )
+                ghc "''${common_flags[@]}" "''${native_link_flags[@]}" -shared -dynamic "''${dynamic_object_args[@]}" \
                   -o "$out/lib/libHS${unitId}-ghc''${compiler_version}.$shared_suffix"
 
                 depends=()
@@ -218,6 +260,10 @@ let
         exposed: True
         exposed-modules: ${lib.concatStringsSep " " moduleNames}
         import-dirs: $iface/lib/ghc/${unitId}
+        include-dirs: ${lib.concatStringsSep " " resolvedIncludeDirs}
+        includes: ${
+          lib.concatStringsSep " " ((component.includes or [ ]) ++ (component.installIncludes or [ ]))
+        }
         library-dirs:
         hs-libraries:
         depends: ''${depends[*]}
@@ -231,9 +277,17 @@ let
         exposed: True
         exposed-modules: ${lib.concatStringsSep " " moduleNames}
         import-dirs: $iface/lib/ghc/${unitId}
-        library-dirs: $out/lib
-        dynamic-library-dirs: $out/lib
+        include-dirs: ${lib.concatStringsSep " " resolvedIncludeDirs}
+        includes: ${
+          lib.concatStringsSep " " ((component.includes or [ ]) ++ (component.installIncludes or [ ]))
+        }
+        library-dirs: $out/lib ${lib.concatStringsSep " " resolvedExtraLibDirs}
+        dynamic-library-dirs: $out/lib ${lib.concatStringsSep " " resolvedExtraLibDirs}
         hs-libraries: HS${unitId}
+        extra-libraries: ${lib.concatStringsSep " " (component.extraLibs or [ ])}
+        ld-options: ${lib.concatStringsSep " " (component.ldOptions or [ ])}
+        framework-dirs: ${lib.concatStringsSep " " resolvedFrameworkDirs}
+        frameworks: ${lib.concatStringsSep " " (component.frameworks or [ ])}
         depends: ''${depends[*]}
         EOF
 

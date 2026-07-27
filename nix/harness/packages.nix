@@ -79,6 +79,7 @@ forAllSystems (
     inherit (groups.tooling)
       penanceLowererEquality
       penanceLowererWasmProvenance
+      penanceComponentQualifiedDependencies
       penanceUnitCacheIsolation
       plannerBin
       penanceDocs
@@ -92,6 +93,7 @@ forAllSystems (
     inherit (groups.penance)
       backpackMultiInstanceModule
       backpackSignaturesModule
+      cSourcesExecutable
       penanceBackpackReal
       penanceBenchChecks
       penanceBenchDevShell
@@ -103,6 +105,7 @@ forAllSystems (
       penanceBenchShell
       penanceBenchTestViaLock
       penanceBenchViaLock
+      penanceCSources
       penanceHackageStateVar
       penanceHaskellAarch64LinuxReal
       penanceLockExternalViaLock

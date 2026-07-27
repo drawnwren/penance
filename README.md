@@ -58,7 +58,12 @@ nix build
 
 `repent` runs Cabal's solver outside Nix evaluation, writes a canonical
 `penance.lock`, and generates one hash-pinned Nix expression per locked Hackage
-sdist. See [Using `penanceProject`](docs/USING_PENANCE_PROJECT.md) and the
+sdist. Bare package constraints in `cabal.project` are applied to every solver
+scope, including setup dependencies and build tools; explicitly scoped
+constraints such as `setup.foo` are preserved. Lock-backed components also
+preserve Cabal C sources, include/header settings, compiler options, and native
+linker settings. See
+[Using `penanceProject`](docs/USING_PENANCE_PROJECT.md) and the
 [examples](examples/README.md) for complete flakes.
 
 ## Documentation

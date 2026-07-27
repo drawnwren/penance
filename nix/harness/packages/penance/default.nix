@@ -4,6 +4,7 @@
   benchGhcPackageFlags,
   benchHpkgs,
   benchSrc,
+  cSourcesSrc,
   crossHaskellCompilerAttr,
   crossHaskellCompilerName,
   crossHaskellGhcFor,
@@ -99,6 +100,23 @@ let
     mode = "component";
   };
   penanceSimpleLibViaLock = penanceSimpleLibLockProject.packages."simple-lib".components.lib;
+  cSourcesProject = penanceProject {
+    src = cSourcesSrc;
+    compiler = "ghc-9.10.2";
+    index-state = "2026-04-01T00:00:00Z";
+    mode = "component";
+  };
+  cSourcesExecutable = cSourcesProject.packages."c-sources".components."exe:c-sources";
+  penanceCSources =
+    pkgs.runCommand "penance-c-sources-proof"
+      {
+        nativeBuildInputs = [ pkgs.gnugrep ];
+      }
+      ''
+        mkdir -p "$out"
+        ${cSourcesExecutable}/bin/c-sources > "$out/output.txt"
+        grep -qx 42 "$out/output.txt"
+      '';
   penanceLockExternalProject = penanceProject {
     src = lockExternalSrc;
     hackageNix = ../../../penance-hackage;
@@ -567,6 +585,9 @@ in
     penanceBenchO0ViaLock
     penanceSimpleLibLockProject
     penanceSimpleLibViaLock
+    cSourcesProject
+    cSourcesExecutable
+    penanceCSources
     penanceLockExternalProject
     penanceLockExternalViaLock
     localThDependencyProject

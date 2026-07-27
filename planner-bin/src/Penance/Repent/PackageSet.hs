@@ -136,7 +136,7 @@ packageSetHash packageSet = "sha256:" ++ sha256Hex (Json.renderJson (packageSetV
 
 packageSetConstraints :: PackageSet -> [String]
 packageSetConstraints packageSet =
-  [ name ++ "==" ++ version
+  [ "any." ++ name ++ "==" ++ version
   | (name, version) <- unique (map (\recipe -> (recipeName recipe, recipeVersion recipe)) recipes)
   ]
   where

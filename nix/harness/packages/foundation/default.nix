@@ -137,6 +137,7 @@ let
   '';
   haskellNixCrossAarch64 = haskellNixPkgs.pkgsCross.aarch64-multiplatform;
   backpackSrc = ../../../../tests/fixtures/backpack-multi-instance;
+  cSourcesSrc = ../../../../tests/fixtures/c-sources;
   crossHelloSrc = ../../../../tests/fixtures/cross-hello;
   hsBootThSrc = ../../../../tests/fixtures/hs-boot-th;
   lockExternalSrc = ../../../../tests/fixtures/lock-external;
@@ -279,6 +280,7 @@ in
     assertCrossHelloElf
     haskellNixCrossAarch64
     backpackSrc
+    cSourcesSrc
     crossHelloSrc
     hsBootThSrc
     lockExternalSrc

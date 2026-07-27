@@ -6,6 +6,7 @@ import Data.Char (isSpace)
 import Data.List (dropWhileEnd)
 import Data.Maybe (fromMaybe)
 import Distribution.Pretty (prettyShow)
+import Penance.CabalProject (qualifyConstraintForAllScopes)
 import Penance.CabalPlan
   ( CabalPlanRequest (..)
   , ExternalSource (..)
@@ -30,7 +31,11 @@ import Penance.Repent.PackageSet
   , packageSetStackage
   , validatePackageSetPlan
   )
-import Penance.Repent.Project (readProjectIndexState, readProjectPackages)
+import Penance.Repent.Project
+  ( readProjectConstraints
+  , readProjectIndexState
+  , readProjectPackages
+  )
 import Penance.Types
   ( CompilerId (..)
   , IndexState (..)
@@ -97,6 +102,7 @@ run :: IO ()
 run = do
   opts <- parseOptions =<< getArgs
   packages <- readProjectPackages (optProject opts)
+  projectConstraints <- readProjectConstraints (optProject opts)
   let constraintSet =
         case optPackageSet opts of
           Just packageSet -> Just packageSet
@@ -109,7 +115,9 @@ run = do
         , planGhcPkg = optGhcPkg opts
         , planCabal = optCabal opts
         , planIndexState = optIndexState opts
-        , planConstraints = maybe [] packageSetConstraints constraintSet
+        , planConstraints =
+            map qualifyConstraintForAllScopes projectConstraints
+              ++ maybe [] packageSetConstraints constraintSet
         , planInput = optPlanJson opts
         }
       >>= either die pure

@@ -258,6 +258,9 @@ M2 static unit builder:
 - no-IFD eval proof for the lock-built benchmark executable, simple library,
   and StateVar external fixture
 - unit builder for Hackage and local units
+- the `c-sources` fixture projects a C source and header outside
+  `hs-source-dirs`, requires a Cabal `cc-options` macro, archives the native
+  object into a local library unit, and runs a linked executable
 - `dbIface`/`dbFull` cutoff matrix covered by dynamic-probes for the lock-built
   benchmark library and executable consumer
 - `.hi` determinism soak covered by dynamic-probes for the lock-built benchmark
