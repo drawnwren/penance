@@ -50,6 +50,21 @@ forAllSystems (
     sharedStateVarUnit = pkgs.lib.findFirst (
       unit: unit.source == "hackage" && unit.name == "StateVar"
     ) (throw "shared package-set fixture needs StateVar") sharedPackageSetRawLock.externalUnits;
+    nullMainLibraryLock = sharedPackageSetRawLock // {
+      externalUnits = map (
+        unit: if unit.unitId == sharedStateVarUnit.unitId then unit // { component = null; } else unit
+      ) sharedPackageSetRawLock.externalUnits;
+    };
+    nullMainLibraryProject = self.lib.${system}.penanceProject {
+      src = ../../tests/fixtures;
+      projectRoot = "lock-external";
+      hackageNix = ../penance-hackage;
+      lockOverride = nullMainLibraryLock;
+    };
+    nullMainLibraryExecutable =
+      nullMainLibraryProject.packages.lock-external.components."exe:lock-external";
+    nullMainLibrarySlice =
+      nullMainLibraryProject.packages.lock-external.externalUnits.${sharedStateVarUnit.unitId};
     sharedStateVarInternalUnit = sharedStateVarUnit // {
       unitId = "StateVar-1.2.2-penance-regression-internal";
       component = "lib:penance-regression-internal";
@@ -125,6 +140,24 @@ forAllSystems (
         '';
     repent-lock-proof = self.packages.${system}.repentBench;
     c-sources = self.packages.${system}.penanceCSources;
+    external-null-main-library =
+      pkgs.runCommand "penance-external-null-main-library-proof"
+        {
+          nativeBuildInputs = [
+            pkgs.gnugrep
+            pkgs.jq
+          ];
+        }
+        ''
+          ${nullMainLibraryExecutable}/bin/lock-external > "$TMPDIR/output"
+          grep -qx lock-external "$TMPDIR/output"
+          test "$(find ${nullMainLibrarySlice}/lib/package.conf.d -name '*.conf' -type f | wc -l | tr -d ' ')" = 1
+          grep -R '^name:[[:space:]]*StateVar$' ${nullMainLibrarySlice}/lib/package.conf.d
+          jq -e --arg unitId ${pkgs.lib.escapeShellArg sharedStateVarUnit.unitId} \
+            '.directHackageUnitIds == [$unitId]' \
+            ${nullMainLibraryExecutable.compile}/metadata.json
+          touch "$out"
+        '';
     shared-package-set =
       assert !corruptedSharedPackageSetEvaluation.success;
       assert

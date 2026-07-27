@@ -496,12 +496,20 @@ let
       }
     );
 
+  isExternalMainLibraryUnit =
+    unit:
+    let
+      component = unit.component or null;
+    in
+    # Cabal plan.json uses both null and "lib" for public main libraries.
+    component == null || component == "lib";
+
   isExternalLibraryUnit =
     unit:
     let
       component = unit.component or null;
     in
-    component == "lib" || (builtins.isString component && lib.hasPrefix "lib:" component);
+    isExternalMainLibraryUnit unit || (builtins.isString component && lib.hasPrefix "lib:" component);
 
   buildExternalSlice =
     hpkgs: contentAddressed: unit: package:
@@ -509,13 +517,14 @@ let
       sliceName = "${sanitizeName unit.name}-${sanitizeName unit.version}-${unit.flagHash}";
       component = unit.component or null;
       registrationField =
-        if component == "lib" then
+        if isExternalMainLibraryUnit unit then
           "name"
         else if builtins.isString component && lib.hasPrefix "lib:" component then
           "lib-name"
         else
           throw "penanceProject: external unit `${unit.unitId}` is not a library component";
-      registrationIdentity = if component == "lib" then unit.name else lib.removePrefix "lib:" component;
+      registrationIdentity =
+        if isExternalMainLibraryUnit unit then unit.name else lib.removePrefix "lib:" component;
     in
     pkgs.runCommand "penance-external-${sliceName}"
       (
@@ -661,7 +670,7 @@ let
             owner = lib.findFirst (
               candidate:
               candidate.source == "hackage"
-              && candidate.component == "lib"
+              && isExternalMainLibraryUnit candidate
               && candidate.name == unit.name
               && candidate.version == unit.version
               && candidate.flagHash == unit.flagHash

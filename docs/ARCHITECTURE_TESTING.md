@@ -261,6 +261,9 @@ M2 static unit builder:
 - the `c-sources` fixture projects a C source and header outside
   `hs-source-dirs`, requires a Cabal `cc-options` macro, archives the native
   object into a local library unit, and runs a linked executable
+- the `external-null-main-library` check rewrites a Hackage main-library unit
+  to Cabal's null `component` representation, then proves its slice,
+  package-database flag, and imported module remain usable
 - `dbIface`/`dbFull` cutoff matrix covered by dynamic-probes for the lock-built
   benchmark library and executable consumer
 - `.hi` determinism soak covered by dynamic-probes for the lock-built benchmark
