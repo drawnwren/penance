@@ -131,6 +131,7 @@ executable repent
   main-is: Main.hs
   hs-source-dirs: app/repent
   build-depends:
+    async,
     base >=4.20 && <5,
     Cabal,
     bytestring,
@@ -140,7 +141,7 @@ executable repent
     penance-planner,
     process
   default-language: Haskell2010
-  ghc-options: -Wall
+  ghc-options: -Wall -threaded
 
 executable normalize-project
   main-is: Main.hs

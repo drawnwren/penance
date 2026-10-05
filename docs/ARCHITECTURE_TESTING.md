@@ -245,6 +245,10 @@ M1 lock:
 - schema-2 unit metadata for the StateVar fixture, including unit IDs, complete
   flags and edges, the Hackage sdist hash, and GHC boot-library markers
 - deterministic repeated lock generation for the external fixture
+- bounded parallel Hackage-expression generation, including proof that workers
+  overlap and component units sharing one expression are generated only once
+- reuse of unchanged on-disk Hackage expressions without invoking `cabal2nix`,
+  plus explicit forced regeneration
 - stale-lock rejection when the fixture dependency set changes
 - explicit `project.pathBase = "project-root"` metadata for lock-local paths
 - `repent --check` wired into `repentBench`
@@ -261,6 +265,9 @@ M2 static unit builder:
 - the `c-sources` fixture projects a C source and header outside
   `hs-source-dirs`, requires a Cabal `cc-options` macro, archives the native
   object into a local library unit, and runs a linked executable
+- the `dependency-inputs` check consumes an injected build header, records a
+  native build tool, and proves runtime PATH/environment wrapping with
+  caller-overridable defaults
 - the `external-null-main-library` check rewrites a Hackage main-library unit
   to Cabal's null `component` representation, then proves its slice,
   package-database flag, and imported module remain usable

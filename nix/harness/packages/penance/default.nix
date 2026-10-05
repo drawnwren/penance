@@ -107,6 +107,48 @@ let
     mode = "component";
   };
   cSourcesExecutable = cSourcesProject.packages."c-sources".components."exe:c-sources";
+  dependencyBuildInput = pkgs.writeTextDir "include/penance_build_input.h" ''
+    #define PENANCE_BUILD_INPUT_BIAS 1
+  '';
+  dependencyNativeBuildInput = pkgs.writeShellScriptBin "penance-native-build-probe" ''
+    exit 0
+  '';
+  dependencyRuntimeInput = pkgs.writeShellScriptBin "penance-runtime-probe" ''
+    printf 'runtime-probe\n'
+  '';
+  cSourcesRawLock = builtins.fromJSON (builtins.readFile (cSourcesSrc + "/penance.lock"));
+  cSourcesDependencyLock = cSourcesRawLock // {
+    packages = map (
+      package:
+      package
+      // {
+        components = map (
+          component:
+          if component.name == "lib" then
+            component
+            // {
+              ccOptions = (component.ccOptions or [ ]) ++ [ "-DPENANCE_BUILD_INPUT_PROBE" ];
+            }
+          else
+            component
+        ) package.components;
+      }
+    ) cSourcesRawLock.packages;
+  };
+  dependencyInputsProject = penanceProject {
+    src = cSourcesSrc;
+    compiler = "ghc-9.10.2";
+    index-state = "2026-04-01T00:00:00Z";
+    mode = "component";
+    lockOverride = cSourcesDependencyLock;
+    contentAddressed = false;
+    buildInputs = [ dependencyBuildInput ];
+    nativeBuildInputs = [ dependencyNativeBuildInput ];
+    runtimeInputs = [ dependencyRuntimeInput ];
+    runtimeEnvironment.PENANCE_RUNTIME_SENTINEL = "runtime-default";
+  };
+  dependencyInputsExecutable =
+    dependencyInputsProject.packages."c-sources".components."exe:c-sources";
   penanceCSources =
     pkgs.runCommand "penance-c-sources-proof"
       {
@@ -116,6 +158,30 @@ let
         mkdir -p "$out"
         ${cSourcesExecutable}/bin/c-sources > "$out/output.txt"
         grep -qx 42 "$out/output.txt"
+      '';
+  penanceDependencyInputs =
+    assert builtins.elem dependencyBuildInput dependencyInputsExecutable.compile.buildInputs;
+    assert builtins.elem dependencyNativeBuildInput
+      dependencyInputsExecutable.compile.nativeBuildInputs;
+    assert dependencyInputsProject.devShells.default.PENANCE_RUNTIME_SENTINEL == "runtime-default";
+    pkgs.runCommand "penance-dependency-inputs-proof"
+      {
+        nativeBuildInputs = [
+          pkgs.gnugrep
+        ];
+      }
+      ''
+        mkdir -p "$out"
+        ${dependencyInputsExecutable}/bin/c-sources > "$out/build-input.txt"
+        grep -qx 42 "$out/build-input.txt"
+
+        env -i ${dependencyInputsExecutable}/bin/c-sources runtime > "$out/runtime-default.txt"
+        sed -n '1p' "$out/runtime-default.txt" | grep -qx runtime-default
+        sed -n '2p' "$out/runtime-default.txt" | grep -F ${dependencyRuntimeInput}/bin
+
+        env -i PENANCE_RUNTIME_SENTINEL=caller-value \
+          ${dependencyInputsExecutable}/bin/c-sources runtime > "$out/runtime-override.txt"
+        sed -n '1p' "$out/runtime-override.txt" | grep -qx caller-value
       '';
   penanceLockExternalProject = penanceProject {
     src = lockExternalSrc;
@@ -588,6 +654,7 @@ in
     cSourcesProject
     cSourcesExecutable
     penanceCSources
+    penanceDependencyInputs
     penanceLockExternalProject
     penanceLockExternalViaLock
     localThDependencyProject

@@ -31,6 +31,7 @@ let
       process
     ];
     executableHaskellDepends = with hpkgs; [
+      async
       base
       Cabal
       bytestring

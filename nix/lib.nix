@@ -761,9 +761,15 @@ let
     };
 
   devShellFromLock =
-    hpkgs: externalContext: includeRepent: packageSet: lock: rootPackage:
+    hpkgs: externalContext: includeRepent: packageSet: dependencyOptions: lock: rootPackage:
     let
       projection = shellProjectionFromLock externalContext lock rootPackage;
+      inherit (dependencyOptions)
+        buildInputs
+        nativeBuildInputs
+        runtimeEnvironment
+        runtimeInputs
+        ;
       ghc = hpkgs.ghcWithPackages (
         _packages: map (unitId: externalContext.packages.${unitId}) projection.hackageUnitIds
       );
@@ -774,7 +780,10 @@ let
           ghc
           pkgs.cabal-install
         ]
-        ++ lib.optional (includeRepent && repent != null) repent;
+        ++ lib.optional (includeRepent && repent != null) repent
+        ++ nativeBuildInputs
+        ++ runtimeInputs;
+        inherit buildInputs;
         PENANCE_LOCK_SCHEMA = lock.schema;
         PENANCE_LOCK_PACKAGES = lib.concatStringsSep " " projection.externalPackages;
         PENANCE_LOCK_UNITS = lib.concatStringsSep " " projection.externalUnitIds;
@@ -795,14 +804,17 @@ let
         PENANCE_PACKAGE_PATH = rootPackage.path;
         PENANCE_CABAL_TARGET = rootPackage.name;
       }
+      // runtimeEnvironment
     );
 
   packageDevShellsFromLock =
-    hpkgs: externalContext: includeRepent: packageSet: lock:
+    hpkgs: externalContext: includeRepent: packageSet: dependencyOptions: lock:
     builtins.listToAttrs (
       map (package: {
         inherit (package) name;
-        value = devShellFromLock hpkgs externalContext includeRepent packageSet lock package;
+        value =
+          devShellFromLock hpkgs externalContext includeRepent packageSet dependencyOptions lock
+            package;
       }) (lock.packages or [ ])
     );
 
@@ -999,8 +1011,15 @@ let
       packageBuilds,
       externalContext,
       contentAddressed,
+      dependencyOptions,
     }:
     let
+      inherit (dependencyOptions)
+        buildInputs
+        nativeBuildInputs
+        runtimeEnvironment
+        runtimeInputs
+        ;
       sourceDirs = component.sourceDirs or [ "." ];
       mainPath = modulePath component.main;
       binName = componentBinName component;
@@ -1020,6 +1039,7 @@ let
         compileFlagValues.flags
         ++ componentExtensionFlags component
         ++ componentHaskellForeignFlags component
+        ++ map (input: "-I${lib.getDev input}/include") buildInputs
         ++ stdDevGhcOptions
         ++ ghcOptions
         ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ "-dynamic-too" ];
@@ -1036,11 +1056,16 @@ let
       linkFlags =
         linkFlagValues.flags
         ++ componentLinkFlags projectedSource component
+        ++ lib.concatMap (input: [
+          "-L${lib.getLib input}/lib"
+          "-optl-Wl,-rpath,${lib.getLib input}/lib"
+        ]) buildInputs
         ++ stdDevGhcOptions
         ++ ghcOptions
         ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ "-dynamic" ];
       cSources = component.cSources or [ ];
-      cCompileFlags = componentCCompileFlags component;
+      cCompileFlags =
+        componentCCompileFlags component ++ map (input: "-optc-I${lib.getDev input}/include") buildInputs;
       objectSuffix = if pkgs.stdenv.hostPlatform.isDarwin then "*.dyn_o" else "*.o";
       directPackageIdShell =
         values:
@@ -1056,6 +1081,19 @@ let
           package_flags+=("-package-id" "$package_id")
         '') values.directHackageUnitIds;
       packageName = "penance-${sanitizeName pkg.name}-${sanitizeName component.name}";
+      runtimeWrapperArgs =
+        lib.optionals (runtimeInputs != [ ]) [
+          "--prefix"
+          "PATH"
+          ":"
+          (lib.makeBinPath runtimeInputs)
+        ]
+        ++ lib.concatMap (name: [
+          "--set-default"
+          name
+          (toString runtimeEnvironment.${name})
+        ]) (builtins.attrNames runtimeEnvironment);
+      runtimeWrapperArgsShell = lib.concatMapStringsSep " " lib.escapeShellArg runtimeWrapperArgs;
       runField =
         if component.kind == "test-suite" then
           "test"
@@ -1070,7 +1108,9 @@ let
               nativeBuildInputs = [
                 hpkgs.ghc
                 pkgs.findutils
-              ];
+              ]
+              ++ nativeBuildInputs;
+              inherit buildInputs;
               passthru.localDependencyDb = compileLocalDbAttr;
             }
             // contentAddressedAttrs contentAddressed
@@ -1166,7 +1206,10 @@ let
             {
               nativeBuildInputs = [
                 hpkgs.ghc
-              ];
+              ]
+              ++ nativeBuildInputs
+              ++ lib.optional (runtimeWrapperArgs != [ ]) pkgs.makeWrapper;
+              inherit buildInputs;
             }
             // contentAddressedAttrs contentAddressed
           )
@@ -1187,6 +1230,9 @@ let
                     link_flags+=("''${package_flags[@]}")
 
                     ghc "''${link_flags[@]}" "''${object_args[@]}" -o "$out/bin/${binName}"
+            ${lib.optionalString (runtimeWrapperArgs != [ ]) ''
+              wrapProgram "$out/bin/${binName}" ${runtimeWrapperArgsShell}
+            ''}
             ${lib.optionalString runExecutables ''
               "$out/bin/${binName}" > "$out/${runField}.txt"
             ''}
@@ -1224,6 +1270,7 @@ let
       packageBuilds,
       externalContext,
       contentAddressed,
+      dependencyOptions,
       ...
     }:
     if component.kind == "library" then
@@ -1239,6 +1286,7 @@ let
           packageBuilds
           externalContext
           contentAddressed
+          dependencyOptions
           ;
       }
     else if
@@ -1308,7 +1356,7 @@ let
     };
 
   packageAttrsFromLock =
-    srcPath: lockContext: lock: ghcOptions: runExecutables: contentAddressed:
+    srcPath: lockContext: dependencyOptions: lock: ghcOptions: runExecutables: contentAddressed:
     let
       inherit (lockContext) hpkgs externalContext;
       packageBuilds = builtins.listToAttrs (
@@ -1331,6 +1379,7 @@ let
                     packageBuilds
                     externalContext
                     contentAddressed
+                    dependencyOptions
                     ;
                 };
               }) (pkg.components or [ ])
@@ -1424,6 +1473,10 @@ in
       mode ? "component",
       flags ? { },
       ghcOptions ? [ ],
+      nativeBuildInputs ? [ ],
+      buildInputs ? [ ],
+      runtimeInputs ? [ ],
+      runtimeEnvironment ? { },
       hackageNix ? null,
       packageSet ? null,
       runExecutables ? false,
@@ -1479,6 +1532,14 @@ in
           lockContextFor packageSet effectiveHackageNix contentAddressed lock
         else
           null;
+      dependencyOptions = {
+        inherit
+          buildInputs
+          nativeBuildInputs
+          runtimeEnvironment
+          runtimeInputs
+          ;
+      };
       supportsWasmPlanner = builtins ? wasm;
       cabalProjectPath = srcPath + "/${cabalProject}";
       cabalProjectText = builtins.readFile cabalProjectPath;
@@ -1505,7 +1566,8 @@ in
       };
       lockBuild =
         if useLockComponents then
-          packageAttrsFromLock srcPath lockContext lock ghcOptions runExecutables contentAddressed
+          packageAttrsFromLock srcPath lockContext dependencyOptions lock ghcOptions runExecutables
+            contentAddressed
         else
           null;
     in
@@ -1523,10 +1585,13 @@ in
         if useLockComponents then
           {
             default =
-              devShellFromLock lockContext.hpkgs lockContext.externalContext includeRepent packageSet lock
+              devShellFromLock lockContext.hpkgs lockContext.externalContext includeRepent packageSet
+                dependencyOptions
+                lock
                 null;
             packages =
               packageDevShellsFromLock lockContext.hpkgs lockContext.externalContext includeRepent packageSet
+                dependencyOptions
                 lock;
           }
         else

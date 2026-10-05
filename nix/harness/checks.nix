@@ -140,6 +140,7 @@ forAllSystems (
         '';
     repent-lock-proof = self.packages.${system}.repentBench;
     c-sources = self.packages.${system}.penanceCSources;
+    dependency-inputs = self.packages.${system}.penanceDependencyInputs;
     external-null-main-library =
       pkgs.runCommand "penance-external-null-main-library-proof"
         {

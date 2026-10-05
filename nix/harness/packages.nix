@@ -106,6 +106,7 @@ forAllSystems (
       penanceBenchTestViaLock
       penanceBenchViaLock
       penanceCSources
+      penanceDependencyInputs
       penanceHackageStateVar
       penanceHaskellAarch64LinuxReal
       penanceLockExternalViaLock

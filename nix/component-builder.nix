@@ -32,8 +32,10 @@
   packageBuilds,
   externalContext,
   contentAddressed,
+  dependencyOptions,
 }:
 let
+  inherit (dependencyOptions) buildInputs nativeBuildInputs;
   inherit (component) unitId;
   sourceDirs = component.sourceDirs or [ "." ];
   moduleNames = component.modules or [ ];
@@ -54,10 +56,12 @@ let
     flagValues.flags
     ++ componentExtensionFlags component
     ++ componentHaskellForeignFlags component
+    ++ map (input: "-I${lib.getDev input}/include") buildInputs
     ++ stdDevGhcOptions
     ++ ghcOptions;
   cSources = component.cSources or [ ];
-  cCompileFlags = componentCCompileFlags component;
+  cCompileFlags =
+    componentCCompileFlags component ++ map (input: "-optc-I${lib.getDev input}/include") buildInputs;
   hackageConfDirs = map (
     externalUnitId: "${externalContext.slices.${externalUnitId}}/lib/package.conf.d"
   ) flagValues.closureHackageUnitIds;
@@ -76,7 +80,12 @@ let
     confDir
   ]) dependencyConfDirs;
   projectedSource = componentSourceProjection srcPath pkg component;
-  nativeLinkFlags = componentLinkFlags projectedSource component;
+  nativeLinkFlags =
+    componentLinkFlags projectedSource component
+    ++ lib.concatMap (input: [
+      "-L${lib.getLib input}/lib"
+      "-optl-Wl,-rpath,${lib.getLib input}/lib"
+    ]) buildInputs;
   resolvedIncludeDirs = componentResolvedIncludeDirs projectedSource component;
   resolvedExtraLibDirs = componentResolvedExtraLibDirs projectedSource component;
   resolvedFrameworkDirs = componentResolvedFrameworkDirs projectedSource component;
@@ -108,7 +117,9 @@ let
             hpkgs.ghc
             canonicalizer
             pkgs.findutils
-          ];
+          ]
+          ++ nativeBuildInputs;
+          inherit buildInputs;
           passthru.localDependencyDb = compileLocalDbAttr;
         }
         // lib.optionalAttrs contentAddressed {
